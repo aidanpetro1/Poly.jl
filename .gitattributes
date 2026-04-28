@@ -1,0 +1,20 @@
+# Force LF line endings for all text files in the repo, regardless of the
+# contributor's local Git config (e.g. core.autocrlf=true on Windows). This
+# matches the Julia ecosystem convention and keeps diffs clean across OSes.
+* text=auto eol=lf
+
+# Explicit overrides for the file types we ship.
+*.jl   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.cff  text eol=lf
+LICENSE text eol=lf
+
+# Treat these as binary so Git doesn't try to diff or normalize them.
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.svg  binary
+*.ico  binary
