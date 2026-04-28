@@ -1,0 +1,27 @@
+# Julia build/cache artifacts
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+deps/deps.jl
+deps/build.log
+/Manifest.toml
+/docs/Manifest.toml
+
+# Documenter output
+/docs/build/
+/docs/site/
+
+# Reference materials (not redistributed; see docs/dev/REFERENCES.md)
+/poly-book.pdf
+/poly-book.txt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# Local-only scratch
+/tmp/
+/scratch/

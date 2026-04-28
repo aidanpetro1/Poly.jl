@@ -1,0 +1,15 @@
+name = "Poly"
+uuid = "c6ac206a-14ad-4e46-bdab-7d10e8cbd250"
+authors = ["Aidan Petrovich <aidanpetrovich@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

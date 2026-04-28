@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use Poly.jl in research, please cite it using these metadata."
+title: "Poly.jl: A Julia library for polynomial functors and dependent lenses"
+authors:
+  - family-names: Petrovich
+    given-names: Aidan
+    email: aidanpetrovich@gmail.com
+type: software
+license: MIT
+repository-code: "https://github.com/aidanpetro1/Poly.jl"
+version: "0.1.0"
+date-released: "2026-04-27"
+keywords:
+  - category-theory
+  - polynomial-functors
+  - dependent-lenses
+  - dynamical-systems
+  - julia
+references:
+  - type: book
+    title: "Polynomial Functors: A Mathematical Theory of Interaction"
+    authors:
+      - family-names: Niu
+        given-names: Nelson
+      - family-names: Spivak
+        given-names: David I.
+    year: 2024
+    url: "https://github.com/ToposInstitute/poly"
+    notes: "Poly.jl follows the structures and conventions of this textbook."
