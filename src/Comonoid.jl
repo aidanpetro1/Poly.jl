@@ -57,8 +57,13 @@ struct Comonoid
             error("Comonoid: eraser codomain $(eraser.cod) ≠ y")
         duplicator.dom == carrier ||
             error("Comonoid: duplicator domain $(duplicator.dom) ≠ carrier $carrier")
-        cc = subst(carrier, carrier)
-        duplicator.cod == cc ||
+        # Shape-check via `is_subst_of` rather than computing `subst(carrier, carrier)`
+        # eagerly and comparing structurally — that double-enumeration was the
+        # type-check cost on the constructor. The eager `subst(...)` in the
+        # *built-in* duplicator constructions (state_system_comonoid etc.)
+        # below is a separate concern, addressed by `subst_targeted_lens`
+        # (Extensions v1, PR #5).
+        is_subst_of(duplicator.cod, carrier, carrier) ||
             error("Comonoid: duplicator codomain ≠ carrier ▷ carrier")
         new(carrier, eraser, duplicator)
     end
@@ -232,6 +237,159 @@ function from_category(C::SmallCategory)
 end
 
 # ============================================================
+# Comonoid arithmetic (Extensions v1, PR #2)
+# ============================================================
+#
+# `+`, `*`, `⊗` on Comonoid. These lift the corresponding categorical
+# operations on small categories through the `to_category ↔ from_category`
+# bridge. The bridge route is slower for large carriers (it enumerates
+# every morphism explicitly via `to_category`) but it's mathematically
+# unambiguous — the result is exactly the categorical coproduct / product
+# of the underlying categories, transported back to the Comonoid form.
+#
+# `c ⊗ d` (Dirichlet/parallel) coincides with `c * d` (categorical
+# product) on small categories — they're both products in `Cat#`. Both
+# names are exposed for symmetry with `Polynomial`'s monoidal operators
+# and to let users signal intent.
+
+"""
+    +(c::Comonoid, d::Comonoid) -> Comonoid
+
+The coproduct of comonoids in `(Poly, y, ▷)`, equivalently the disjoint
+union of the small categories they present (Niu/Spivak Ch. 7). Objects
+and morphisms are tagged `(1, _)` for the `c`-side and `(2, _)` for the
+`d`-side; composition only fires within a side.
+"""
+function +(c::Comonoid, d::Comonoid)
+    cat_c = to_category(c)
+    cat_d = to_category(d)
+
+    # Tagged objects.
+    objs = vcat([(1, o) for o in cat_c.objects.elements],
+                [(2, o) for o in cat_d.objects.elements])
+    # Tagged morphisms — `from_category` requires morphisms to be
+    # `(domain, direction)` pairs, so we wrap the whole tagged morphism
+    # as the direction component of a new (object, direction) pair.
+    mors = vcat([((1, cat_c.dom[m]), (1, m)) for m in cat_c.morphisms.elements],
+                [((2, cat_d.dom[m]), (2, m)) for m in cat_d.morphisms.elements])
+
+    dom_dict = Dict{Any,Any}()
+    cod_dict = Dict{Any,Any}()
+    id_dict  = Dict{Any,Any}()
+    comp_dict = Dict{Any,Any}()
+
+    for m in cat_c.morphisms.elements
+        wrapped = ((1, cat_c.dom[m]), (1, m))
+        dom_dict[wrapped] = (1, cat_c.dom[m])
+        cod_dict[wrapped] = (1, cat_c.cod[m])
+    end
+    for m in cat_d.morphisms.elements
+        wrapped = ((2, cat_d.dom[m]), (2, m))
+        dom_dict[wrapped] = (2, cat_d.dom[m])
+        cod_dict[wrapped] = (2, cat_d.cod[m])
+    end
+
+    for o in cat_c.objects.elements
+        id_orig = cat_c.identity[o]   # = (o, ident_dir)
+        id_dict[(1, o)] = ((1, o), (1, id_orig))
+    end
+    for o in cat_d.objects.elements
+        id_orig = cat_d.identity[o]
+        id_dict[(2, o)] = ((2, o), (2, id_orig))
+    end
+
+    for ((f, g), h) in cat_c.composition
+        wf = ((1, cat_c.dom[f]), (1, f))
+        wg = ((1, cat_c.dom[g]), (1, g))
+        wh = ((1, cat_c.dom[h]), (1, h))
+        comp_dict[(wf, wg)] = wh
+    end
+    for ((f, g), h) in cat_d.composition
+        wf = ((2, cat_d.dom[f]), (2, f))
+        wg = ((2, cat_d.dom[g]), (2, g))
+        wh = ((2, cat_d.dom[h]), (2, h))
+        comp_dict[(wf, wg)] = wh
+    end
+
+    cat_sum = SmallCategory(FinPolySet(objs), FinPolySet(mors),
+                            dom_dict, cod_dict, id_dict, comp_dict)
+    from_category(cat_sum)
+end
+
+"""
+    *(c::Comonoid, d::Comonoid) -> Comonoid
+
+The categorical product of the small categories presented by `c` and `d`.
+Objects are pairs `(x, y)`; morphisms are pairs `(m, n)` with
+`dom(m, n) = (dom(m), dom(n))` and componentwise composition.
+
+For small categories this coincides with `c ⊗ d` ([`⊗`](@ref) on Comonoid);
+both names are exposed for parallelism with `Polynomial`'s operators.
+"""
+function *(c::Comonoid, d::Comonoid)
+    cat_c = to_category(c)
+    cat_d = to_category(d)
+
+    objs = [(x, y) for x in cat_c.objects.elements
+                       for y in cat_d.objects.elements]
+    raw_mors = [(m, n) for m in cat_c.morphisms.elements
+                           for n in cat_d.morphisms.elements]
+
+    # Wrap each morphism as `(dom_pair, raw_morphism_pair)` so it lives in
+    # the (domain, direction) shape that `from_category` requires.
+    function wrap(mn)
+        m, n = mn
+        ((cat_c.dom[m], cat_d.dom[n]), mn)
+    end
+    mors = [wrap(mn) for mn in raw_mors]
+
+    dom_dict = Dict{Any,Any}()
+    cod_dict = Dict{Any,Any}()
+    id_dict  = Dict{Any,Any}()
+    comp_dict = Dict{Any,Any}()
+
+    for mn in raw_mors
+        m, n = mn
+        w = wrap(mn)
+        dom_dict[w] = (cat_c.dom[m], cat_d.dom[n])
+        cod_dict[w] = (cat_c.cod[m], cat_d.cod[n])
+    end
+
+    for x in cat_c.objects.elements, y in cat_d.objects.elements
+        id_pair = (cat_c.identity[x], cat_d.identity[y])
+        id_dict[(x, y)] = wrap(id_pair)
+    end
+
+    for ((m1, m1_), m_comp) in cat_c.composition
+        for ((n1, n1_), n_comp) in cat_d.composition
+            f = wrap((m1, n1))
+            g = wrap((m1_, n1_))
+            h = wrap((m_comp, n_comp))
+            comp_dict[(f, g)] = h
+        end
+    end
+
+    cat_prod = SmallCategory(FinPolySet(objs), FinPolySet(mors),
+                             dom_dict, cod_dict, id_dict, comp_dict)
+    from_category(cat_prod)
+end
+
+"""
+    ⊗(c::Comonoid, d::Comonoid) -> Comonoid
+
+The Dirichlet / parallel product on Comonoid. For small categories this
+coincides with the categorical product ([`*(::Comonoid, ::Comonoid)`](@ref)) —
+in `Cat#` the two operations are the same. Exposed under `⊗` for
+symmetry with `Polynomial ⊗`; the name signals "I'm composing in
+parallel" without forcing the user to remember the categorical-product
+equivalence.
+
+If you want the proof of equivalence inline:
+`is_iso(c ⊗ d, c * d)` should hold for every pair of comonoids.
+"""
+⊗(c::Comonoid, d::Comonoid) = c * d
+
+# ============================================================
 # Validation
 # ============================================================
 
@@ -245,10 +403,32 @@ Check the category axioms on a `SmallCategory`:
 - Associativity: `(f ; g) ; h == f ; (g ; h)` for every composable triple.
 
 Returns `true` if all axioms hold; with `verbose=true`, prints which axiom
-failed first. Composition direction is left-to-right: `f ; g` means do `f`
-then `g`, so `cod(f) == dom(g)` is required.
+failed (structural hint included). Composition direction is left-to-right:
+`f ; g` means do `f` then `g`, so `cod(f) == dom(g)` is required.
+
+For the structured result with per-failure detail (law symbol, location,
+structural hint, actual / expected values), call
+[`validate_category_laws_detailed`](@ref).
 """
-function validate_category_laws(C::SmallCategory; verbose::Bool=false)
+validate_category_laws(C::SmallCategory; verbose::Union{Bool,Symbol}=false) =
+    validate_category_laws_detailed(C; verbose=verbose).passed
+
+"""
+    validate_category_laws_detailed(C::SmallCategory; verbose=false) -> ValidationResult
+
+Same checks as [`validate_category_laws`](@ref), but returns the full
+`ValidationResult` with structural failure information. Use this when you
+want to inspect `result.failures` programmatically.
+"""
+function validate_category_laws_detailed(C::SmallCategory; verbose::Union{Bool,Symbol}=false)
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    function record!(f::ValidationFailure)
+        push!(failures, f)
+        verbose === true && println("Category law violation: ", f.structural_hint)
+        return collect_all
+    end
+
     # Index morphisms by domain so we can iterate composable triples
     # directly rather than triple-looping over all morphisms (which would
     # be O(|morphisms|³)). With this index the associativity sweep is
@@ -269,20 +449,26 @@ function validate_category_laws(C::SmallCategory; verbose::Bool=false)
 
         lhs = get(C.composition, (id_d, f), nothing)
         if lhs != f
-            verbose && println("Left identity failed: id(dom($f)) ; $f = $lhs ≠ $f")
-            return false
+            failure = ValidationFailure(
+                :identity_left, (f,),
+                "left identity at object $df: id_$df ; $f = $lhs, should be $f — " *
+                "either identity[$df] is wrong or composition[(id_$df, $f)] is wrong",
+                lhs, f)
+            record!(failure) || return fail(failures)
         end
 
         rhs = get(C.composition, (f, id_c), nothing)
         if rhs != f
-            verbose && println("Right identity failed: $f ; id(cod($f)) = $rhs ≠ $f")
-            return false
+            failure = ValidationFailure(
+                :identity_right, (f,),
+                "right identity at object $cf: $f ; id_$cf = $rhs, should be $f — " *
+                "either identity[$cf] is wrong or composition[($f, id_$cf)] is wrong",
+                rhs, f)
+            record!(failure) || return fail(failures)
         end
     end
 
-    # Associativity: enumerate composable triples (f, g, h) directly via
-    # the dom-index. For each f, g ranges over morphisms out of cod(f),
-    # and h ranges over morphisms out of cod(g).
+    # Associativity
     for f in C.morphisms.elements
         for g in out_of[C.cod[f]]
             fg = C.composition[(f, g)]
@@ -291,14 +477,18 @@ function validate_category_laws(C::SmallCategory; verbose::Bool=false)
                 lhs = C.composition[(fg, h)]
                 rhs = C.composition[(f, gh)]
                 if lhs != rhs
-                    verbose && println("Associativity failed for ($f, $g, $h): ($f;$g);$h = $lhs but $f;($g;$h) = $rhs")
-                    return false
+                    failure = ValidationFailure(
+                        :associativity, (f, g, h),
+                        "associativity fails at composable triple ($f, $g, $h): " *
+                        "($f;$g);$h = $lhs but $f;($g;$h) = $rhs",
+                        lhs, rhs)
+                    record!(failure) || return fail(failures)
                 end
             end
         end
     end
 
-    true
+    isempty(failures) ? pass("category laws") : fail(failures)
 end
 
 """
@@ -351,9 +541,21 @@ Mathematically the two modes verify the same thing.
 The `:lens` mode avoids building the explicit unitor and associator
 lenses by reading each law off element-wise.
 """
-function validate_comonoid(c::Comonoid; mode::Symbol=:category, verbose::Bool=false)
+validate_comonoid(c::Comonoid; mode::Symbol=:category,
+                  verbose::Union{Bool,Symbol}=false) =
+    validate_comonoid_detailed(c; mode=mode, verbose=verbose).passed
+
+"""
+    validate_comonoid_detailed(c::Comonoid; mode=:category, verbose=false) -> ValidationResult
+
+Same checks as [`validate_comonoid`](@ref), but returns the full
+`ValidationResult` with structural failure information. Use this when you
+want to inspect `result.failures` programmatically.
+"""
+function validate_comonoid_detailed(c::Comonoid; mode::Symbol=:category,
+                                     verbose::Union{Bool,Symbol}=false)
     if mode === :category
-        return validate_category_laws(to_category(c); verbose=verbose)
+        return validate_category_laws_detailed(to_category(c); verbose=verbose)
     elseif mode === :lens
         return _validate_comonoid_lens_form(c; verbose=verbose)
     else
@@ -364,11 +566,23 @@ end
 
 # Internal: the lens-form check, as Niu/Spivak Chapter 7 writes the laws.
 # Reachable through `validate_comonoid(c; mode=:lens)`.
-function _validate_comonoid_lens_form(c::Comonoid; verbose::Bool=false)
+#
+# Returns a `ValidationResult`. Each failure carries a structural hint
+# naming the offending sub-component (duplicator on-positions, eraser on
+# direction, etc.) rather than just a numbered law.
+function _validate_comonoid_lens_form(c::Comonoid; verbose::Union{Bool,Symbol}=false)
     p = c.carrier
     pp = p.positions
     pp isa FinPolySet ||
         error("validate_comonoid mode=:lens requires finite carrier positions")
+
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    function record!(f::ValidationFailure)
+        push!(failures, f)
+        verbose === true && println("Law violation: ", f.structural_hint)
+        return collect_all  # if collect_all, keep going; otherwise stop
+    end
 
     # Cache δ.on_pos at each i and ε.on_dir at each i to avoid recomputing.
     jbar_at = Dict()
@@ -376,8 +590,12 @@ function _validate_comonoid_lens_form(c::Comonoid; verbose::Bool=false)
     for i in pp.elements
         i′, jbar = c.duplicator.on_positions.f(i)
         if i′ != i
-            verbose && println("Law 1 (δ first-component) failed at $i: got $i′")
-            return false
+            f = ValidationFailure(
+                :delta_first_component, (i,),
+                "duplicator's on_positions at $i must preserve the position " *
+                "component (return (i, jbar)); got first component $i′",
+                i′, i)
+            record!(f) || return fail(failures)
         end
         jbar_at[i] = jbar
         id_at[i]   = c.eraser.on_directions.f(i).f(:pt)
@@ -387,17 +605,23 @@ function _validate_comonoid_lens_form(c::Comonoid; verbose::Bool=false)
     for i in pp.elements
         Di = direction_at(p, i)::FinPolySet
         id_i = id_at[i]
-        # On positions: jbar_i(id_i) == i
         if jbar_at[i][id_i] != i
-            verbose && println("Law 2 (left counit, positions) failed at $i: jbar_i(id_$i) = $(jbar_at[i][id_i]) ≠ $i")
-            return false
+            f = ValidationFailure(
+                :counit_left_positions, (i,),
+                "duplicator's jbar at $i disagrees with eraser's identity choice: " *
+                "jbar_$i(id_$i) = $(jbar_at[i][id_i]), should be $i",
+                jbar_at[i][id_i], i)
+            record!(f) || return fail(failures)
         end
-        # On directions: δ♯_i(id_i, d) == d for every d ∈ c[i]
         for d in Di.elements
             got = c.duplicator.on_directions.f(i).f((id_i, d))
             if got != d
-                verbose && println("Law 2 (left counit, directions) failed at ($i, $d): δ♯ = $got ≠ $d")
-                return false
+                f = ValidationFailure(
+                    :counit_left_directions, (i, d),
+                    "δ♯_$i(id_$i, $d) should be $d (composing identity then $d), got $got — " *
+                    "duplicator on-directions disagrees with eraser at object $i",
+                    got, d)
+                record!(f) || return fail(failures)
             end
         end
     end
@@ -410,8 +634,12 @@ function _validate_comonoid_lens_form(c::Comonoid; verbose::Bool=false)
             id_j = id_at[j]
             got = c.duplicator.on_directions.f(i).f((d, id_j))
             if got != d
-                verbose && println("Law 3 (right counit) failed at ($i, $d): δ♯ = $got ≠ $d")
-                return false
+                f = ValidationFailure(
+                    :counit_right_directions, (i, d),
+                    "δ♯_$i($d, id_$j) should be $d (composing $d then identity at codomain), got $got — " *
+                    "duplicator on-directions disagrees with eraser at object $j",
+                    got, d)
+                record!(f) || return fail(failures)
             end
         end
     end
@@ -431,15 +659,19 @@ function _validate_comonoid_lens_form(c::Comonoid; verbose::Bool=false)
                     lhs = c.duplicator.on_directions.f(i).f((ab, e))
                     rhs = c.duplicator.on_directions.f(i).f((a, be))
                     if lhs != rhs
-                        verbose && println("Law 4 (coassoc) failed at ($i, $a, $b, $e): ($a;$b);$e = $lhs vs $a;($b;$e) = $rhs")
-                        return false
+                        f = ValidationFailure(
+                            :coassoc, (i, a, b),
+                            "duplicator is not associative at composable triple ($i, $a, $b): " *
+                            "($a;$b);$e = $lhs but $a;($b;$e) = $rhs — composition routing differs",
+                            lhs, rhs)
+                        record!(f) || return fail(failures)
                     end
                 end
             end
         end
     end
 
-    true
+    isempty(failures) ? pass("lens-form check") : fail(failures)
 end
 
 # ============================================================
@@ -611,21 +843,46 @@ property of `cofree_universal` directly via
 
 With `verbose=true`, prints which axiom failed first.
 """
-function validate_retrofunctor(F::Retrofunctor; strict::Bool=true, verbose::Bool=false)
+validate_retrofunctor(F::Retrofunctor; strict::Bool=true,
+                      verbose::Union{Bool,Symbol}=false) =
+    validate_retrofunctor_detailed(F; strict=strict, verbose=verbose).passed
+
+"""
+    validate_retrofunctor_detailed(F::Retrofunctor; strict=true, verbose=false) -> ValidationResult
+
+Same checks as [`validate_retrofunctor`](@ref), but returns the full
+`ValidationResult` with structural failure information.
+"""
+function validate_retrofunctor_detailed(F::Retrofunctor; strict::Bool=true,
+                                         verbose::Union{Bool,Symbol}=false)
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    function record!(f::ValidationFailure)
+        push!(failures, f)
+        verbose === true && println("Retrofunctor violation: ", f.structural_hint)
+        return collect_all
+    end
+
     if strict
         lhs1 = compose(F.underlying, F.cod.eraser)
         if lhs1 != F.dom.eraser
-            verbose && println("Counit preservation failed: F ⨟ ε_d ≠ ε_c")
-            return false
+            failure = ValidationFailure(
+                :counit_preservation, (),
+                "F ⨟ ε_cod ≠ ε_dom — F.underlying composed with the cod-eraser does not equal the dom-eraser",
+                lhs1, F.dom.eraser)
+            record!(failure) || return fail(failures)
         end
 
         lhs2 = compose(F.underlying, F.cod.duplicator)
         rhs2 = compose(F.dom.duplicator, subst(F.underlying, F.underlying))
         if lhs2 != rhs2
-            verbose && println("Comultiplication preservation failed: F ⨟ δ_d ≠ δ_c ⨟ (F ▷ F)")
-            return false
+            failure = ValidationFailure(
+                :comult_preservation, (),
+                "F ⨟ δ_cod ≠ δ_dom ⨟ (F ▷ F) — F.underlying does not preserve the duplicator strictly",
+                lhs2, rhs2)
+            record!(failure) || return fail(failures)
         end
-        return true
+        return isempty(failures) ? pass("retrofunctor (strict)") : fail(failures)
     end
 
     # --- Element-wise validation ---
@@ -634,62 +891,57 @@ function validate_retrofunctor(F::Retrofunctor; strict::Bool=true, verbose::Bool
     pp isa FinPolySet ||
         error("validate_retrofunctor (non-strict) requires finite carrier positions")
 
-    # Counit preservation, on positions: F.cod.eraser ∘ F = F.dom.eraser
-    # Both sides on positions send every i to :pt — trivially true.
-    # On directions at i: ε_d♯_{F(i)}(:pt) walked back through F♯_i should
-    # equal ε_c♯_i(:pt) — i.e., the identity direction at i in the dom comonoid.
     for i in pp.elements
         id_d_at_Fi = F.cod.eraser.on_directions.f(F.underlying.on_positions.f(i)).f(:pt)
         via_F = F.underlying.on_directions.f(i).f(id_d_at_Fi)
         id_c_at_i = F.dom.eraser.on_directions.f(i).f(:pt)
         if via_F != id_c_at_i
-            verbose && println("Counit preservation (directions) failed at $i: $via_F ≠ $id_c_at_i")
-            return false
+            failure = ValidationFailure(
+                :counit_preservation_directions, (i,),
+                "counit preservation at $i: F♯_$i pulls cod-identity at F($i) to $via_F, " *
+                "but dom-identity at $i is $id_c_at_i — F.underlying's on-directions disagrees " *
+                "with the comonoids' eraser identifications",
+                via_F, id_c_at_i)
+            record!(failure) || return fail(failures)
         end
     end
 
-    # Comultiplication preservation, on directions: for every (a, b) ∈ (c_d ▷ c_d)
-    # at F(i), the two ways of pulling back to a c_dom-direction at i agree.
-    # LHS: F♯_i applied to δ_d♯_{F(i)}((a, b))
-    # RHS: δ_dom♯_i applied to (F♯_i(a), F♯_{j}(b)) where j is the c_dom-codomain.
     for i in pp.elements
         Fi = F.underlying.on_positions.f(i)
         Di_d = direction_at(F.cod.carrier, Fi)::FinPolySet
-        # Iterate over (c_d ▷ c_d)-directions at δ_d(Fi).
-        # δ_d(Fi) = (Fi, jbar_d) — a position of c_d ▷ c_d. Direction-set is
-        # pairs (a, b) with a ∈ c_d[Fi], b ∈ c_d[jbar_d(a)].
         Fi_dup = F.cod.duplicator.on_positions.f(Fi)
         jbar_d = Fi_dup[2]
         for a in Di_d.elements
             j_d = jbar_d[a]
             Dj_d = direction_at(F.cod.carrier, j_d)::FinPolySet
             for b in Dj_d.elements
-                # LHS: F♯_i(δ_d♯_{Fi}(a, b))
                 composed_d = F.cod.duplicator.on_directions.f(Fi).f((a, b))
                 lhs = F.underlying.on_directions.f(i).f(composed_d)
-                # RHS: δ_dom♯_i(F♯_i(a), F♯_j(b)) where j = c_dom-codomain after F♯_i(a).
                 a_in_dom = F.underlying.on_directions.f(i).f(a)
                 j_in_dom = F.dom.duplicator.on_positions.f(i)[2][a_in_dom]
-                # F.underlying.on_pos(j_in_dom) should give some position of c_d
-                # which we can use to call F.underlying.on_directions at j_in_dom
-                # with input b. But b is a c_d-direction at j_d, not at F(j_in_dom).
-                # The key bridge is: by counit-preservation-on-positions, the
-                # c_d-position visited from Fi via a equals F(j_in_dom).
                 F_j_in_dom = F.underlying.on_positions.f(j_in_dom)
                 if F_j_in_dom != j_d
-                    verbose && println("Comult (positions) failed at ($i, $a): F($j_in_dom) = $F_j_in_dom ≠ $j_d (counit-preservation contradiction)")
-                    return false
+                    failure = ValidationFailure(
+                        :comult_positions, (i, a),
+                        "comult preservation at ($i, $a): counit-preservation contradiction — " *
+                        "F($j_in_dom) = $F_j_in_dom should equal cod-codomain $j_d",
+                        F_j_in_dom, j_d)
+                    record!(failure) || return fail(failures)
+                    continue
                 end
-                # b is in c_d[F(j_in_dom)] = c_d[j_d], so we can pull it back via F♯ at j_in_dom.
                 b_in_dom = F.underlying.on_directions.f(j_in_dom).f(b)
                 rhs = F.dom.duplicator.on_directions.f(i).f((a_in_dom, b_in_dom))
                 if lhs != rhs
-                    verbose && println("Comult preservation (directions) failed at ($i, $a, $b): $lhs ≠ $rhs")
-                    return false
+                    failure = ValidationFailure(
+                        :comult_directions, (i, a, b),
+                        "comult preservation at ($i, $a, $b): F♯ ∘ δ_cod gives $lhs " *
+                        "but δ_dom ∘ (F♯, F♯) gives $rhs — direction-routing diverges",
+                        lhs, rhs)
+                    record!(failure) || return fail(failures)
                 end
             end
         end
     end
 
-    return true
+    isempty(failures) ? pass("retrofunctor (element-wise)") : fail(failures)
 end

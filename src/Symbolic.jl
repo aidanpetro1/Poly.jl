@@ -274,6 +274,30 @@ subst(p::SymbolicPolynomial, q::SymbolicPolynomial) =
     SymbolicPolynomial(SymOp(:sub, SymExpr[p.expr, q.expr]))
 
 # ----------------------------------------------------------------
+# Promotion: concrete ↔ symbolic in arithmetic (Extensions v1, PR #8)
+# ----------------------------------------------------------------
+#
+# When an arithmetic operator sees one concrete and one symbolic operand,
+# the concrete operand is silently lifted via `lift(::Polynomial)` and
+# the result is symbolic. Equality (`==`) intentionally does *not*
+# auto-promote — comparing across the boundary is a category error;
+# users should call `evaluate` or `lift` explicitly first if they need
+# cross-world equality. See `docs/literate/08_interop.jl` for the
+# rationale.
+
++(p::Polynomial, sq::SymbolicPolynomial) = lift(p) + sq
++(sp::SymbolicPolynomial, q::Polynomial) = sp + lift(q)
+
+*(p::Polynomial, sq::SymbolicPolynomial) = lift(p) * sq
+*(sp::SymbolicPolynomial, q::Polynomial) = sp * lift(q)
+
+parallel(p::Polynomial, sq::SymbolicPolynomial) = parallel(lift(p), sq)
+parallel(sp::SymbolicPolynomial, q::Polynomial) = parallel(sp, lift(q))
+
+subst(p::Polynomial, sq::SymbolicPolynomial) = subst(lift(p), sq)
+subst(sp::SymbolicPolynomial, q::Polynomial) = subst(sp, lift(q))
+
+# ----------------------------------------------------------------
 # Operations on SymbolicLens
 # ----------------------------------------------------------------
 
@@ -351,6 +375,36 @@ binary ops to their concrete counterparts.
 function evaluate(p::SymbolicPolynomial, env::Dict{Symbol,Polynomial}=Dict{Symbol,Polynomial}())
     _eval(p.expr, env)
 end
+
+# ----------------------------------------------------------------
+# Intent-revealing aliases (Extensions v1, PR #8)
+# ----------------------------------------------------------------
+#
+# `lift` and `evaluate` are general-purpose names; `to_symbolic` and
+# `to_concrete` make the boundary-crossing intent obvious at call sites
+# without requiring the reader to remember which direction `lift`/
+# `evaluate` go.
+
+"""
+    to_symbolic(p::Polynomial; name=nothing) -> SymbolicPolynomial
+    to_symbolic(f::Lens; name=nothing) -> SymbolicLens
+
+Alias for [`lift`](@ref). Promote a concrete polynomial or lens to the
+symbolic layer. Use this at boundary-crossing sites where the
+direction is what matters more than the operation.
+"""
+to_symbolic(p::Polynomial; name::Union{Symbol,Nothing}=nothing) = lift(p; name=name)
+to_symbolic(f::Lens; name::Union{Symbol,Nothing}=nothing) = lift(f; name=name)
+
+"""
+    to_concrete(p::SymbolicPolynomial, env=Dict()) -> Polynomial
+
+Alias for [`evaluate`](@ref). Reduce a symbolic polynomial back to a
+concrete `Polynomial`, looking up free variables in `env`. Errors if
+`p` contains operators with no concrete implementation.
+"""
+to_concrete(p::SymbolicPolynomial, env::Dict{Symbol,Polynomial}=Dict{Symbol,Polynomial}()) =
+    evaluate(p, env)
 
 function _eval(e::SymVar, env)
     haskey(env, e.name) || error("Unbound symbolic variable :$(e.name) of kind :$(e.kind)")

@@ -1254,4 +1254,16 @@ using .Poly
 
     end  # Sprint 8 testset
 
+    # ============================================================
+    # Extensions v1 (post-Sprint 8): see docs/dev/extensions_v1_design.md
+    # ============================================================
+    include("test_extensions_lazy_subst.jl")
+    include("test_extensions_cap_message.jl")
+    include("test_extensions_coproduct.jl")
+    include("test_extensions_validation.jl")
+    include("test_extensions_coalgebra.jl")
+    include("test_extensions_monoidal_ops.jl")
+    include("test_extensions_subst_targeted.jl")
+    include("test_extensions_interop.jl")
+
 end  # outer @testset "Poly.jl"

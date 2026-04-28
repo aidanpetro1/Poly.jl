@@ -36,13 +36,14 @@ Confirm CI runs: <https://github.com/aidanpetro1/Poly.jl/actions>. The `CI` work
 
 Documenter pushes the rendered docs site to a `gh-pages` branch. It needs an SSH keypair where the public key is a deploy key on the repo and the private key is a repo secret named `DOCUMENTER_KEY`.
 
-The easy way:
+Run it as two Julia calls — `using DocumenterTools` in the same `-e` block as `Pkg.add` fails because the loader resolves `using` before `Pkg.add` runs:
 
 ```sh
-julia -e 'using Pkg; Pkg.activate(temp=true); Pkg.add("DocumenterTools"); using DocumenterTools; DocumenterTools.genkeys(user="aidanpetro1", repo="Poly.jl")'
+julia -e 'using Pkg; Pkg.add("DocumenterTools")'
+julia -e 'using DocumenterTools; DocumenterTools.genkeys(user="aidanpetro1", repo="Poly.jl")'
 ```
 
-That command prints two things:
+The second call prints two things:
 
 1. A **public key** — go to <https://github.com/aidanpetro1/Poly.jl/settings/keys/new>, paste it, name it "DOCUMENTER_KEY", and **check "Allow write access"**.
 

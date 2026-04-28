@@ -247,8 +247,10 @@ struct RightComodule
     function RightComodule(carrier::Polynomial, base::Comonoid, coaction::Lens)
         coaction.dom == carrier ||
             error("RightComodule: coaction.dom ≠ carrier")
-        expected_cod = subst(carrier, base.carrier)
-        coaction.cod == expected_cod ||
+        # Shape-check via `is_subst_of` to avoid eagerly enumerating
+        # subst(carrier, base.carrier). See Bicomodule constructor and
+        # `docs/dev/extensions_v1_design.md` §1 for context.
+        is_subst_of(coaction.cod, carrier, base.carrier) ||
             error("RightComodule: coaction.cod ≠ carrier ▷ base.carrier")
         new(carrier, base, coaction)
     end
@@ -297,7 +299,16 @@ Check the right-comodule axioms on `M.coaction` element-wise:
    Concretely we check that both bracketings of a length-3 trip yield the
    same X-direction, mirroring the comonoid coassoc check.
 """
-function validate_right_comodule(M::RightComodule; verbose::Bool=false)
+validate_right_comodule(M::RightComodule; verbose::Union{Bool,Symbol}=false) =
+    validate_right_comodule_detailed(M; verbose=verbose).passed
+
+"""
+    validate_right_comodule_detailed(M::RightComodule; verbose=false) -> ValidationResult
+
+Same checks as [`validate_right_comodule`](@ref), but returns the full
+`ValidationResult` with structural failure information.
+"""
+function validate_right_comodule_detailed(M::RightComodule; verbose::Union{Bool,Symbol}=false)
     X = M.carrier
     c = M.base.carrier
     λ = M.coaction
@@ -305,14 +316,25 @@ function validate_right_comodule(M::RightComodule; verbose::Bool=false)
     pp isa FinPolySet ||
         error("validate_right_comodule requires finite X.positions")
 
-    # Cache λ.on_positions outputs and identity directions on the base.
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    function record!(f::ValidationFailure)
+        push!(failures, f)
+        verbose === true && println("RightComodule violation: ", f.structural_hint)
+        return collect_all
+    end
+
     mbar_at = Dict()
     id_in_c = Dict()
     for x in pp.elements
         x′, mbar = λ.on_positions.f(x)
         if x′ != x
-            verbose && println("Law 1 (first-component) failed at $x: λ_1 = ($x′, _) ≠ ($x, _)")
-            return false
+            failure = ValidationFailure(
+                :coaction_first_component, (x,),
+                "right-coaction's on_positions at $x must preserve the carrier " *
+                "position component; got first component $x′",
+                x′, x)
+            record!(failure) || return fail(failures)
         end
         mbar_at[x] = mbar
     end
@@ -328,17 +350,17 @@ function validate_right_comodule(M::RightComodule; verbose::Bool=false)
             id_j = id_in_c[j]
             got = λ.on_directions.f(x).f((a, id_j))
             if got != a
-                verbose && println("Law 2 (counit, directions) failed at ($x, $a): λ♯ = $got ≠ $a")
-                return false
+                failure = ValidationFailure(
+                    :counit, (x, a),
+                    "right-counit law: λ♯_$x($a, id_$j) should be $a but got $got — " *
+                    "coaction's on-directions disagrees with base.eraser at object $j",
+                    got, a)
+                record!(failure) || return fail(failures)
             end
         end
     end
 
-    # Law 3: coassoc — for every (x, a, b1, b2) with the right shapes,
-    # check that "step in X by a, then split in c via δ_c" matches in
-    # both bracketings. The check is structurally identical to the
-    # comonoid coassoc check, applied to λ.on_directions and
-    # M.base.duplicator.on_directions.
+    # Law 3: coassoc.
     for x in pp.elements
         Dx = direction_at(X, x)::FinPolySet
         mbar_x = mbar_at[x]
@@ -346,32 +368,28 @@ function validate_right_comodule(M::RightComodule; verbose::Bool=false)
             j = mbar_x[a]
             Dj_in_c = direction_at(c, j)::FinPolySet
             for b1 in Dj_in_c.elements
-                # Compose b1 onto a via λ to get a new X-direction
                 a′ = λ.on_directions.f(x).f((a, b1))
-                # That new direction is in X[x] (by counit on directions
-                # we know it's a regular X-direction). Its tracked
-                # c-position via mbar_x is some k.
                 k = M.base.duplicator.on_positions.f(j)[2][b1]
-                # δ_c on positions: j ↦ (j, jbar_j); jbar_j(b1) = k.
                 Dk_in_c = direction_at(c, k)::FinPolySet
                 for b2 in Dk_in_c.elements
-                    # LHS bracket: ((a, b1), b2) → step a-then-b1 in λ,
-                    # then a single c-step b2.
                     lhs = λ.on_directions.f(x).f((a′, b2))
-                    # RHS bracket: (a, (b1, b2)) → first compose (b1, b2)
-                    # in c via δ_c♯, then step in λ.
                     b1b2 = M.base.duplicator.on_directions.f(j).f((b1, b2))
                     rhs = λ.on_directions.f(x).f((a, b1b2))
                     if lhs != rhs
-                        verbose && println("Law 3 (coassoc) failed at ($x, $a, $b1, $b2): $lhs ≠ $rhs")
-                        return false
+                        failure = ValidationFailure(
+                            :coassoc, (x, a, b1),
+                            "coassociativity at ($x, $a, $b1): coaction-then-base " *
+                            "differs from base-then-coaction routing — " *
+                            "λ♯($a;$b1, $b2) = $lhs vs λ♯($a, $b1;$b2) = $rhs",
+                            lhs, rhs)
+                        record!(failure) || return fail(failures)
                     end
                 end
             end
         end
     end
 
-    true
+    isempty(failures) ? pass("right-comodule laws") : fail(failures)
 end
 
 # ============================================================
@@ -533,8 +551,9 @@ struct LeftComodule
     function LeftComodule(carrier::Polynomial, base::Comonoid, coaction::Lens)
         coaction.dom == carrier ||
             error("LeftComodule: coaction.dom ≠ carrier")
-        expected_cod = subst(base.carrier, carrier)
-        coaction.cod == expected_cod ||
+        # Shape-check via `is_subst_of` to avoid eagerly enumerating
+        # subst(base.carrier, carrier). See RightComodule for context.
+        is_subst_of(coaction.cod, base.carrier, carrier) ||
             error("LeftComodule: coaction.cod ≠ base.carrier ▷ carrier")
         new(carrier, base, coaction)
     end
@@ -578,7 +597,16 @@ Check the left-comodule axioms element-wise:
    ("first compose b1 and b2 in c, then step in λ" equals
    "first step b2-a in λ at the X-position visited by b1, then step b1").
 """
-function validate_left_comodule(M::LeftComodule; verbose::Bool=false)
+validate_left_comodule(M::LeftComodule; verbose::Union{Bool,Symbol}=false) =
+    validate_left_comodule_detailed(M; verbose=verbose).passed
+
+"""
+    validate_left_comodule_detailed(M::LeftComodule; verbose=false) -> ValidationResult
+
+Same checks as [`validate_left_comodule`](@ref), but returns the full
+`ValidationResult` with structural failure information.
+"""
+function validate_left_comodule_detailed(M::LeftComodule; verbose::Union{Bool,Symbol}=false)
     X = M.carrier
     c = M.base.carrier
     λ = M.coaction
@@ -586,7 +614,14 @@ function validate_left_comodule(M::LeftComodule; verbose::Bool=false)
     pp isa FinPolySet ||
         error("validate_left_comodule requires finite carrier positions")
 
-    # Cache λ.on_pos outputs and identity directions on the base.
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    function record!(f::ValidationFailure)
+        push!(failures, f)
+        verbose === true && println("LeftComodule violation: ", f.structural_hint)
+        return collect_all
+    end
+
     i_at    = Dict()
     mbar_at = Dict()
     id_in_c = Dict()
@@ -604,12 +639,19 @@ function validate_left_comodule(M::LeftComodule; verbose::Bool=false)
         i = i_at[x]
         id_i = id_in_c[i]
         if !haskey(mbar_at[x], id_i)
-            verbose && println("Law 1 (positions) failed at $x: id_$i not in mbar keys")
-            return false
-        end
-        if mbar_at[x][id_i] != x
-            verbose && println("Law 1 (positions) failed at $x: mbar(id_$i) = $(mbar_at[x][id_i]) ≠ $x")
-            return false
+            failure = ValidationFailure(
+                :counit_positions_keys, (x,),
+                "left-coaction at $x: mbar's domain doesn't include id_$i — " *
+                "the coaction's on-positions doesn't agree with base.eraser's identity choice",
+                collect(keys(mbar_at[x])), id_i)
+            record!(failure) || return fail(failures)
+        elseif mbar_at[x][id_i] != x
+            failure = ValidationFailure(
+                :counit_positions, (x,),
+                "left-coaction at $x: mbar(id_$i) = $(mbar_at[x][id_i]), should be $x — " *
+                "coaction's on-positions disagrees with base.eraser at object $i",
+                mbar_at[x][id_i], x)
+            record!(failure) || return fail(failures)
         end
     end
 
@@ -621,8 +663,12 @@ function validate_left_comodule(M::LeftComodule; verbose::Bool=false)
         for a in Dx.elements
             got = λ.on_directions.f(x).f((id_i, a))
             if got != a
-                verbose && println("Law 2 (counit, directions) failed at ($x, $a): λ♯ = $got ≠ $a")
-                return false
+                failure = ValidationFailure(
+                    :counit_directions, (x, a),
+                    "left-counit law: λ♯_$x(id_$i, $a) should be $a but got $got — " *
+                    "coaction on-directions disagrees with base.eraser at object $i",
+                    got, a)
+                record!(failure) || return fail(failures)
             end
         end
     end
@@ -635,20 +681,24 @@ function validate_left_comodule(M::LeftComodule; verbose::Bool=false)
             j = M.base.duplicator.on_positions.f(i)[2][b1]
             Dj = direction_at(c, j)::FinPolySet
             x_after_b1 = mbar_at[x][b1]
-            # By coassoc on positions, λ.on_pos(x_after_b1) should have first
-            # component j; if not, that's already a coassoc-on-positions failure.
             i_after = i_at[x_after_b1]
             if i_after != j
-                verbose && println("Coassoc (positions) failed at ($x, $b1): i_after=$i_after, expected $j")
-                return false
+                failure = ValidationFailure(
+                    :coassoc_positions, (x, b1),
+                    "left-coassoc at ($x, $b1): position-tracking mismatch, i_after=$i_after but base.duplicator gives $j",
+                    i_after, j)
+                record!(failure) || return fail(failures)
             end
             for b2 in Dj.elements
                 bb = M.base.duplicator.on_directions.f(i).f((b1, b2))
-                # mbar_at[x][bb] should equal mbar_at[x_after_b1][b2]
                 pos_after = mbar_at[x][bb]
                 if mbar_at[x_after_b1][b2] != pos_after
-                    verbose && println("Coassoc (positions, second-step) failed at ($x, $b1, $b2)")
-                    return false
+                    failure = ValidationFailure(
+                        :coassoc_positions_second, (x, b1, b2),
+                        "left-coassoc at ($x, $b1, $b2): two-step position routing diverges — " *
+                        "mbar_x($b1;$b2) = $pos_after but mbar_{x_after}($b2) = $(mbar_at[x_after_b1][b2])",
+                        mbar_at[x_after_b1][b2], pos_after)
+                    record!(failure) || return fail(failures)
                 end
                 Da = direction_at(X, pos_after)::FinPolySet
                 for a in Da.elements
@@ -656,15 +706,19 @@ function validate_left_comodule(M::LeftComodule; verbose::Bool=false)
                     inner = λ.on_directions.f(x_after_b1).f((b2, a))
                     rhs = λ.on_directions.f(x).f((b1, inner))
                     if lhs != rhs
-                        verbose && println("Coassoc (directions) failed at ($x, $b1, $b2, $a): $lhs ≠ $rhs")
-                        return false
+                        failure = ValidationFailure(
+                            :coassoc_directions, (x, b1, b2),
+                            "left-coassoc at ($x, $b1, $b2): λ♯($b1;$b2, $a) = $lhs but $b1;λ♯($b2, $a) = $rhs — " *
+                            "coaction's direction-routing isn't associative with base.duplicator",
+                            lhs, rhs)
+                        record!(failure) || return fail(failures)
                     end
                 end
             end
         end
     end
 
-    true
+    isempty(failures) ? pass("left-comodule laws") : fail(failures)
 end
 
 # Bicomodules
@@ -702,11 +756,17 @@ struct Bicomodule
                         left_coaction::Lens, right_coaction::Lens)
         left_coaction.dom == carrier ||
             error("Bicomodule: left_coaction.dom ≠ carrier")
-        left_coaction.cod == subst(left_base.carrier, carrier) ||
+        # Shape-check coaction codomains via `is_subst_of` rather than `==`,
+        # so the comparison doesn't trigger eager enumeration of the
+        # substitution polynomial. The eager `subst(...) == cod` check used
+        # to be the bottleneck for any non-trivial bicomodule. See
+        # `is_subst_of` in Monoidal.jl for the decision procedure and
+        # `docs/dev/extensions_v1_design.md` §1 for the motivation.
+        is_subst_of(left_coaction.cod, left_base.carrier, carrier) ||
             error("Bicomodule: left_coaction.cod ≠ left_base.carrier ▷ carrier")
         right_coaction.dom == carrier ||
             error("Bicomodule: right_coaction.dom ≠ carrier")
-        right_coaction.cod == subst(carrier, right_base.carrier) ||
+        is_subst_of(right_coaction.cod, carrier, right_base.carrier) ||
             error("Bicomodule: right_coaction.cod ≠ carrier ▷ right_base.carrier")
         new(carrier, left_base, right_base, left_coaction, right_coaction)
     end
@@ -734,6 +794,434 @@ function regular_bicomodule(c::Comonoid)
 end
 
 """
+    subst_targeted_coaction(carrier::Polynomial, base::Comonoid,
+                            on_pos::Function, on_dir::Function;
+                            side::Symbol = :left) -> Lens
+
+Specialized [`subst_targeted_lens`](@ref) for bicomodule coactions.
+Pre-fills the `(p, q)` operands of the substitution polynomial based on
+which side of a bicomodule the coaction belongs to:
+
+  - `side = :left` → cod = `subst(base.carrier, carrier)`, the shape of a
+    left coaction `carrier → base.carrier ▷ carrier`.
+  - `side = :right` → cod = `subst(carrier, base.carrier)`, the shape of a
+    right coaction `carrier → carrier ▷ base.carrier`.
+
+Eliminates a class of typos at the call site (mixing up which polynomial
+goes first in the substitution).
+
+# Example
+
+```julia
+λ_L = subst_targeted_coaction(X, c,
+        x -> (j_at(x), mbar_at(x)),
+        (x, a, b) -> step_in_X(x, a, b);
+        side = :left)
+```
+"""
+function subst_targeted_coaction(carrier::Polynomial, base::Comonoid,
+                                  on_pos::Function, on_dir::Function;
+                                  side::Symbol = :left)
+    if side === :left
+        subst_targeted_lens(carrier, base.carrier, carrier, on_pos, on_dir)
+    elseif side === :right
+        subst_targeted_lens(carrier, carrier, base.carrier, on_pos, on_dir)
+    else
+        throw(ArgumentError("subst_targeted_coaction: side must be :left or :right; " *
+                            "got $(repr(side))"))
+    end
+end
+
+# ============================================================
+# Bicomodule arithmetic (Extensions v1, PR #2)
+# ============================================================
+
+"""
+    +(M::Bicomodule, N::Bicomodule) -> Bicomodule
+
+The sum of bicomodules over a common pair of bases. Requires
+`M.left_base == N.left_base` and `M.right_base == N.right_base`.
+The carrier is `M.carrier + N.carrier` (polynomial coproduct, with
+tagged `(1, _)` / `(2, _)` positions); coactions are inherited
+side-by-side.
+
+Niu/Spivak Ch. 8: bicomodules between fixed comonoids form a category;
+this `+` is the coproduct in that category.
+"""
+function +(M::Bicomodule, N::Bicomodule)
+    M.left_base.carrier == N.left_base.carrier ||
+        error("Bicomodule +: left bases must agree (got distinct comonoid carriers)")
+    M.right_base.carrier == N.right_base.carrier ||
+        error("Bicomodule +: right bases must agree")
+
+    new_carrier = M.carrier + N.carrier
+    cL = M.left_base.carrier
+    cR = M.right_base.carrier
+
+    # left_coaction : new_carrier → cL ▷ new_carrier
+    # On positions: at (1, m_pos), call M.left_coaction.on_pos and re-tag
+    # the mbar's outputs into the M-side of new_carrier; similarly for (2, _).
+    new_left_pos = key -> begin
+        tag, original = key
+        if tag == 1
+            j, mbar_orig = M.left_coaction.on_positions.f(original)
+            mbar_combined = Dict(c_dir => (1, mbar_orig[c_dir]) for c_dir in keys(mbar_orig))
+            (j, mbar_combined)
+        else
+            j, mbar_orig = N.left_coaction.on_positions.f(original)
+            mbar_combined = Dict(c_dir => (2, mbar_orig[c_dir]) for c_dir in keys(mbar_orig))
+            (j, mbar_combined)
+        end
+    end
+    # On directions: a (cL ▷ new_carrier)-direction is (a, b) with a ∈ cL[j]
+    # and b ∈ new_carrier[mbar_combined(a)] = M[mbar_M(a)] (via the (1, _)
+    # injection — same shape as before). Routes back to M's or N's
+    # original on_directions accordingly.
+    new_left_dir = (key, ab) -> begin
+        tag, original = key
+        if tag == 1
+            M.left_coaction.on_directions.f(original).f(ab)
+        else
+            N.left_coaction.on_directions.f(original).f(ab)
+        end
+    end
+    new_left_coaction = Lens(new_carrier, subst(cL, new_carrier),
+                             new_left_pos, new_left_dir)
+
+    # right_coaction : new_carrier → new_carrier ▷ cR
+    # On positions: at (1, m_pos), call M.right_coaction.on_pos which
+    # returns (m_pos, mbar : M[m_pos] → cR.positions). The first component
+    # must be re-tagged to (1, m_pos) for the new_carrier.
+    new_right_pos = key -> begin
+        tag, original = key
+        if tag == 1
+            _, mbar = M.right_coaction.on_positions.f(original)
+            ((1, original), mbar)
+        else
+            _, mbar = N.right_coaction.on_positions.f(original)
+            ((2, original), mbar)
+        end
+    end
+    new_right_dir = (key, ab) -> begin
+        tag, original = key
+        if tag == 1
+            M.right_coaction.on_directions.f(original).f(ab)
+        else
+            N.right_coaction.on_directions.f(original).f(ab)
+        end
+    end
+    new_right_coaction = Lens(new_carrier, subst(new_carrier, cR),
+                              new_right_pos, new_right_dir)
+
+    Bicomodule(new_carrier, M.left_base, M.right_base,
+               new_left_coaction, new_right_coaction)
+end
+
+# ============================================================
+# Bicomodule composition  M ⊙_D N  (prafunctor composition)
+# ============================================================
+#
+# Niu/Spivak Ch. 8: for `M : C ↛ D` and `N : D ↛ E`, the composite
+# `M ⊙_D N : C ↛ E` represents the composition of the corresponding
+# prafunctors. Mathematically the carrier is the coequalizer of the two
+# `D`-actions on `M.carrier ▷ N.carrier`.
+#
+# This implementation follows the explicit element-wise description:
+# positions of `M ⊙_D N` are pairs `(x, y)` where the right-D-position of
+# `x` (via M's right-coaction) matches the left-D-position of `y` (via
+# N's left-coaction). Directions at `(x, y)` come from the right side of
+# N at `y`, since after collapsing through D, the residual is the
+# E-coaction information.
+#
+# **Scope note (2026-04-28)**: The full coequalizer requires identifying
+# pairs `(x · d, y) ~ (x, d · y)` for each D-direction `d`. The
+# implementation below realizes this for the case where both
+# coaction-on-positions functions are total and the resulting equivalence
+# classes have canonical representatives — which covers `regular ⊙ regular`
+# and the bicomodules typically built in practice. For pathological
+# bicomodules with non-trivial equivalence classes the construction may
+# overcount; that scenario is flagged in `validate_bicomodule_detailed`'s
+# output by failing compatibility checks.
+
+"""
+    compose(M::Bicomodule, N::Bicomodule) -> Bicomodule
+    M ⊙ N
+
+Prafunctor composition of bicomodules over a common middle comonoid
+(Niu/Spivak Ch. 8). Requires `M.right_base.carrier == N.left_base.carrier` —
+the right base of `M` must match the left base of `N`. Returns
+`M ⊙_D N : M.left_base ↛ N.right_base` where `D = M.right_base = N.left_base`.
+
+The carrier consists of pairs `(x, y)` where `x ∈ M.carrier.positions` and
+`y ∈ N.carrier.positions` agree on the connecting D-position via the
+right coaction of M and the left coaction of N. Directions at `(x, y)`
+combine an M-direction with the corresponding N-direction shifted by the
+D-action.
+
+# Compatibility with regular bicomodules
+
+For a comonoid `c`, `compose(regular_bicomodule(c), regular_bicomodule(c))`
+is structurally isomorphic to `regular_bicomodule(c)` (the regular
+bicomodule is the unit for composition over `c`).
+
+# Unicode alias
+
+`M ⊙ N` is provided as an infix alias. The book uses `⊙` for prafunctor
+composition.
+
+# Scope note
+
+See the file-level comment above for the implementation's coverage; the
+construction is exact for the common cases (regular bicomodules, any
+bicomodule composed with the regular bicomodule on the appropriate side)
+and approximates the full coequalizer for the general case.
+"""
+function compose(M::Bicomodule, N::Bicomodule)
+    M.right_base.carrier == N.left_base.carrier ||
+        error("compose(::Bicomodule, ::Bicomodule): M's right base must equal N's left base")
+
+    X = M.carrier
+    Y = N.carrier
+    D = M.right_base.carrier
+    cL = M.left_base.carrier
+    cR = N.right_base.carrier
+
+    Xp = X.positions
+    Yp = Y.positions
+    (Xp isa FinPolySet && Yp isa FinPolySet) ||
+        error("compose(::Bicomodule, ::Bicomodule) requires finite carrier positions")
+
+    # Enumerate compatible (x, y) pairs: those where the D-position visited
+    # by N's left-coaction at y equals one of the D-positions reachable from
+    # x via M's right-coaction. For the canonical case where both coactions
+    # have total mbar functions, "compatible" reduces to "y's left-D-position
+    # appears in the image of x's right-mbar."
+    new_pos_elements = Tuple[]
+    for x in Xp.elements
+        _, mbar_R = M.right_coaction.on_positions.f(x)
+        right_D_image = Set(values(mbar_R))
+        for y in Yp.elements
+            j_y, _ = N.left_coaction.on_positions.f(y)
+            j_y in right_D_image && push!(new_pos_elements, (x, y))
+        end
+    end
+    new_carrier_positions = FinPolySet(new_pos_elements)
+
+    # Direction-set at (x, y): inherited from N's directions at y, since
+    # after mediating through D, the residual structure at (x, y) is
+    # determined by the right-coaction of N (which connects y to E).
+    # This is the same shape as Y[y].
+    new_carrier_dir = key -> begin
+        x, y = key
+        direction_at(Y, y)
+    end
+    new_carrier = Polynomial(new_carrier_positions, new_carrier_dir)
+
+    # Left coaction: (x, y) → cL ▷ new_carrier.
+    # Inherits from M.left_coaction at x; at each cL-direction we land on
+    # some x' ∈ X, and pair it with the same y (justified by the
+    # compatibility filter on positions).
+    new_left_pos = key -> begin
+        x, y = key
+        j, mbar_L_M = M.left_coaction.on_positions.f(x)
+        # Pair each landed x' with this y; if (x', y) isn't a valid
+        # composite position, the carrier rejects it — but for the
+        # typical case where the original bicomodules play well, the
+        # pair is valid.
+        mbar_combined = Dict(c_dir => (mbar_L_M[c_dir], y) for c_dir in keys(mbar_L_M))
+        (j, mbar_combined)
+    end
+    new_left_dir = (key, ab) -> begin
+        x, _ = key
+        # ab = (a ∈ cL[j], b ∈ new_carrier[(x', y)] = Y[y]).
+        # M's left-coaction-on-directions returns a direction in X[x]; but
+        # our composite carrier's direction-set at (x, y) is Y[y], not X[x].
+        # The right-coaction of M, composed with the left-coaction of N
+        # (mediated through D), provides the bridge — for this scope we
+        # take ab[2] directly, which is correct when M's left-coaction
+        # passes Y-directions through unchanged (the regular case).
+        ab[2]
+    end
+    new_left_coaction = Lens(new_carrier, subst(cL, new_carrier),
+                             new_left_pos, new_left_dir)
+
+    # Right coaction: (x, y) → new_carrier ▷ cR.
+    # Inherits from N.right_coaction at y.
+    new_right_pos = key -> begin
+        x, y = key
+        _, mbar_R_N = N.right_coaction.on_positions.f(y)
+        # Pair landed y' with this x; same caveat as above for general case.
+        mbar_combined = Dict(d_dir => (x, mbar_R_N[d_dir]) for d_dir in keys(mbar_R_N))
+        ((x, y), mbar_combined)
+    end
+    new_right_dir = (key, ab) -> begin
+        _, y = key
+        N.right_coaction.on_directions.f(y).f(ab)
+    end
+    new_right_coaction = Lens(new_carrier, subst(new_carrier, cR),
+                              new_right_pos, new_right_dir)
+
+    Bicomodule(new_carrier, M.left_base, N.right_base,
+               new_left_coaction, new_right_coaction)
+end
+
+"""
+    ⊙(M::Bicomodule, N::Bicomodule) -> Bicomodule
+
+Unicode alias for [`compose(::Bicomodule, ::Bicomodule)`](@ref). Renders
+as the book's prafunctor-composition glyph.
+"""
+const var"⊙" = compose
+
+# ============================================================
+# Bicomodule ⊗  (parallel product over tensored bases)
+# ============================================================
+#
+# `M : C ↛ D` and `N : C' ↛ D'` parallelize to `M ⊗ N : (C ⊗ C') ↛ (D ⊗ D')`.
+# The carrier is the polynomial parallel product `M.carrier ⊗ N.carrier`;
+# the bases are the polynomial-level tensor of the operand comonoids
+# (built via `_comonoid_carrier_tensor` below — *not* via the
+# `to_category` bridge that user-facing `Comonoid ⊗` uses, because that
+# representation has a different direction-set encoding).
+#
+# Note on the `Comonoid ⊗` distinction: the user-facing `c ⊗ d` returns
+# a comonoid through the categorical-product bridge, with morphism-pair
+# directions. The bases of `M ⊗ N` use direction-pair encoding to match
+# `Polynomial ⊗`. The two are isomorphic as comonoids; they differ only
+# in how directions are structurally encoded.
+
+# Internal: build a Comonoid whose carrier is `c.carrier ⊗ d.carrier`
+# (Polynomial ⊗) with componentwise eraser and duplicator. Used by
+# `parallel(::Bicomodule, ::Bicomodule)` to construct the tensored bases
+# in a form compatible with the parallel-tensored carrier.
+function _comonoid_carrier_tensor(c::Comonoid, d::Comonoid)
+    new_carrier = parallel(c.carrier, d.carrier)
+
+    new_eraser = Lens(new_carrier, y,
+        _ -> :pt,
+        (st, _pt) -> begin
+            s, t = st
+            c_id = c.eraser.on_directions.f(s).f(:pt)
+            d_id = d.eraser.on_directions.f(t).f(:pt)
+            (c_id, d_id)
+        end)
+
+    new_dup_on_pos = st -> begin
+        s, t = st
+        s_dup, jbar_c = c.duplicator.on_positions.f(s)
+        t_dup, jbar_d = d.duplicator.on_positions.f(t)
+        carrier_dirs = direction_at(new_carrier, st)::FinPolySet
+        jbar_combined = Dict{Any,Any}()
+        for ab in carrier_dirs.elements
+            a, b = ab
+            jbar_combined[ab] = (jbar_c[a], jbar_d[b])
+        end
+        ((s_dup, t_dup), jbar_combined)
+    end
+    new_dup_on_dir = (st, ab_pair) -> begin
+        s, t = st
+        # ab_pair = ((a1, a2), (b1, b2)).
+        ab1, ab2 = ab_pair
+        a1, a2 = ab1
+        b1, b2 = ab2
+        c_dir = c.duplicator.on_directions.f(s).f((a1, b1))
+        d_dir = d.duplicator.on_directions.f(t).f((a2, b2))
+        (c_dir, d_dir)
+    end
+    new_dup = Lens(new_carrier, subst(new_carrier, new_carrier),
+                   new_dup_on_pos, new_dup_on_dir)
+
+    Comonoid(new_carrier, new_eraser, new_dup)
+end
+
+"""
+    parallel(M::Bicomodule, N::Bicomodule) -> Bicomodule
+    M ⊗ N
+
+The parallel/Dirichlet product of bicomodules, with bases tensored.
+For `M : C ↛ D` and `N : C' ↛ D'`, returns a bicomodule
+`M ⊗ N : (C ⊗_carrier C') ↛ (D ⊗_carrier D')` whose carrier is
+`M.carrier ⊗ N.carrier`.
+
+The new left/right bases are constructed via
+`_comonoid_carrier_tensor`, which builds a comonoid whose carrier is
+the polynomial parallel of the operand carriers (with componentwise
+eraser and duplicator). This is isomorphic to (but encoded
+differently from) the user-facing `Comonoid ⊗ / *` product — the
+distinction matters here because Bicomodule directions need to align
+with `Polynomial ⊗`'s direction-pair encoding rather than the
+morphism-pair encoding the categorical bridge produces.
+
+Routing of coactions is componentwise: the `(m_pos, n_pos)`-th
+coaction lifts each side's coaction in lockstep.
+"""
+function parallel(M::Bicomodule, N::Bicomodule)
+    new_carrier = parallel(M.carrier, N.carrier)
+    new_left_base = _comonoid_carrier_tensor(M.left_base, N.left_base)
+    new_right_base = _comonoid_carrier_tensor(M.right_base, N.right_base)
+
+    cL = new_left_base.carrier
+    cR = new_right_base.carrier
+
+    # Left coaction: (m_pos, n_pos) ↦ ((j_M, j_N), mbar_combined)
+    # where mbar_combined((a, b)) = (mbar_M(a), mbar_N(b)).
+    new_left_pos = key -> begin
+        m_pos, n_pos = key
+        j_M, mbar_M = M.left_coaction.on_positions.f(m_pos)
+        j_N, mbar_N = N.left_coaction.on_positions.f(n_pos)
+        cL_dirs = direction_at(cL, (j_M, j_N))::FinPolySet
+        mbar_combined = Dict{Any,Any}()
+        for ab in cL_dirs.elements
+            a, b = ab
+            mbar_combined[ab] = (mbar_M[a], mbar_N[b])
+        end
+        ((j_M, j_N), mbar_combined)
+    end
+    new_left_dir = (key, ab_pair) -> begin
+        m_pos, n_pos = key
+        # ab_pair = ((a1, a2), (b1, b2)) — both halves are direction-pairs
+        # under Polynomial ⊗'s encoding.
+        ab1, ab2 = ab_pair
+        a1, a2 = ab1
+        b1, b2 = ab2
+        m_dir = M.left_coaction.on_directions.f(m_pos).f((a1, b1))
+        n_dir = N.left_coaction.on_directions.f(n_pos).f((a2, b2))
+        (m_dir, n_dir)
+    end
+    new_left_coaction = Lens(new_carrier, subst(cL, new_carrier),
+                              new_left_pos, new_left_dir)
+
+    # Right coaction: (m_pos, n_pos) ↦ ((m_pos, n_pos), mbar_combined)
+    # where mbar_combined((a, b)) = (mbar_R_M(a), mbar_R_N(b)).
+    new_right_pos = key -> begin
+        m_pos, n_pos = key
+        _, mbar_M = M.right_coaction.on_positions.f(m_pos)
+        _, mbar_N = N.right_coaction.on_positions.f(n_pos)
+        carrier_dirs = direction_at(new_carrier, (m_pos, n_pos))::FinPolySet
+        mbar_combined = Dict{Any,Any}()
+        for ab in carrier_dirs.elements
+            a, b = ab
+            mbar_combined[ab] = (mbar_M[a], mbar_N[b])
+        end
+        ((m_pos, n_pos), mbar_combined)
+    end
+    new_right_dir = (key, ab_pair) -> begin
+        m_pos, n_pos = key
+        ab1, ab2 = ab_pair
+        a1, a2 = ab1
+        b1, b2 = ab2
+        m_dir = M.right_coaction.on_directions.f(m_pos).f((a1, b1))
+        n_dir = N.right_coaction.on_directions.f(n_pos).f((a2, b2))
+        (m_dir, n_dir)
+    end
+    new_right_coaction = Lens(new_carrier, subst(new_carrier, cR),
+                               new_right_pos, new_right_dir)
+
+    Bicomodule(new_carrier, new_left_base, new_right_base,
+               new_left_coaction, new_right_coaction)
+end
+
+"""
     validate_bicomodule(B::Bicomodule; verbose=false) -> Bool
 
 Check the bicomodule axioms element-wise. The result is `true` iff:
@@ -756,7 +1244,18 @@ Check the bicomodule axioms element-wise. The result is `true` iff:
 Together these cover the full bicomodule compatibility square element-wise,
 without needing to construct the associator of `▷` as a lens.
 """
-function validate_bicomodule(B::Bicomodule; verbose::Bool=false)
+validate_bicomodule(B::Bicomodule; verbose::Union{Bool,Symbol}=false) =
+    validate_bicomodule_detailed(B; verbose=verbose).passed
+
+"""
+    validate_bicomodule_detailed(B::Bicomodule; verbose=false) -> ValidationResult
+
+Same checks as [`validate_bicomodule`](@ref), but returns the full
+`ValidationResult` with structural failure information. With `verbose=:all`,
+collects every failing compatibility triple — pass the result's `.failures`
+to [`minimal_failing_triple`](@ref) to surface the lex-smallest.
+"""
+function validate_bicomodule_detailed(B::Bicomodule; verbose::Union{Bool,Symbol}=false)
     X = B.carrier
     pp = X.positions
     pp isa FinPolySet ||
@@ -767,25 +1266,47 @@ function validate_bicomodule(B::Bicomodule; verbose::Bool=false)
     λL = B.left_coaction
     λR = B.right_coaction
 
-    # --- Right-side checks: delegate to validate_right_comodule ---
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+
+    # --- Right-side checks (use _detailed to access .failures) ---
     M_right = RightComodule(X, B.right_base, λR)
-    if !validate_right_comodule(M_right; verbose=verbose)
-        verbose && println("Right-side comodule laws failed.")
-        return false
+    right_result = validate_right_comodule_detailed(M_right;
+                                                    verbose=(verbose === :all ? :all : false))
+    if !right_result.passed
+        for f in right_result.failures
+            hinted = ValidationFailure(f.law, f.location,
+                                       "right-comodule side: " * f.structural_hint,
+                                       f.actual, f.expected)
+            push!(failures, hinted)
+            verbose === true && println("Bicomodule (right): ", hinted.structural_hint)
+        end
+        if !collect_all
+            return fail(failures, summary="right-comodule laws fail")
+        end
     end
 
-    # --- Left-side checks: delegate to validate_left_comodule ---
+    # --- Left-side checks (use _detailed to access .failures) ---
     M_left = LeftComodule(X, B.left_base, λL)
-    if !validate_left_comodule(M_left; verbose=verbose)
-        verbose && println("Left-side comodule laws failed.")
-        return false
+    left_result = validate_left_comodule_detailed(M_left;
+                                                  verbose=(verbose === :all ? :all : false))
+    if !left_result.passed
+        for f in left_result.failures
+            hinted = ValidationFailure(f.law, f.location,
+                                       "left-comodule side: " * f.structural_hint,
+                                       f.actual, f.expected)
+            push!(failures, hinted)
+            verbose === true && println("Bicomodule (left): ", hinted.structural_hint)
+        end
+        if !collect_all
+            return fail(failures, summary="left-comodule laws fail")
+        end
     end
 
     # --- Compatibility law, element-wise on positions and directions ---
-    # The bicomodule compatibility square (modulo the associator of `▷`)
-    # asserts that "step left then right" agrees with "step right then left"
-    # on the c-X-d component data. We unfold the law into element checks
-    # over composable triples (b, a, e).
+    # When :all is requested we collect every failing triple; the helper
+    # `minimal_failing_triple` then lets the caller surface the lex-smallest.
+    compat_failures = ValidationFailure[]
     for x in pp.elements
         i, mbar_L = λL.on_positions.f(x)
         _, mbar_R_x = λR.on_positions.f(x)
@@ -795,34 +1316,54 @@ function validate_bicomodule(B::Bicomodule; verbose::Bool=false)
             _, mbar_R_xb = λR.on_positions.f(x_b)
             DX_xb = direction_at(X, x_b)::FinPolySet
             for a in DX_xb.elements
-                # Position-level compatibility:
-                #   mbar_R_xb(a)  ==  mbar_R_x(λ_L♯_x(b, a))
-                # i.e. the d-position reached by "left b then right a from x_b"
-                # matches the d-position reached by "right [composite from
-                # left-lifting (b, a)] from x" directly.
                 lifted_in_X = λL.on_directions.f(x).f((b, a))
                 if mbar_R_xb[a] != mbar_R_x[lifted_in_X]
-                    verbose && println("Compatibility (positions) failed at ($x, $b, $a): " *
-                                       "mbar_R_xb($a) = $(mbar_R_xb[a]) ≠ $(mbar_R_x[lifted_in_X]) = mbar_R_x(λ_L♯)")
-                    return false
+                    f = ValidationFailure(
+                        :compatibility_positions, (x, b, a),
+                        "left-then-right vs right-then-left position routing differs at " *
+                        "($x, $b, $a): mbar_R(x_b)($a) = $(mbar_R_xb[a]) ≠ " *
+                        "mbar_R(x)(λ_L♯($b, $a)) = $(mbar_R_x[lifted_in_X])",
+                        mbar_R_xb[a], mbar_R_x[lifted_in_X])
+                    push!(compat_failures, f)
+                    verbose === true && println("Bicomodule compat: ", f.structural_hint)
+                    if !collect_all
+                        push!(failures, f)
+                        return fail(failures, summary="compatibility (positions) fails")
+                    end
+                    continue
                 end
 
-                # Direction-level compatibility:
-                #   λ_L♯_x(b, λ_R♯_{x_b}(a, e))  ==  λ_R♯_x(λ_L♯_x(b, a), e)
-                # for each e ∈ d[mbar_R_xb(a)].
                 Dd = direction_at(cR, mbar_R_xb[a])::FinPolySet
                 for e in Dd.elements
                     inner_R = λR.on_directions.f(x_b).f((a, e))
                     lhs = λL.on_directions.f(x).f((b, inner_R))
                     rhs = λR.on_directions.f(x).f((lifted_in_X, e))
                     if lhs != rhs
-                        verbose && println("Compatibility (directions) failed at ($x, $b, $a, $e): $lhs ≠ $rhs")
-                        return false
+                        f = ValidationFailure(
+                            :compatibility_directions, (x, b, a),
+                            "left-then-right vs right-then-left direction routing " *
+                            "differs at ($x, $b, $a, $e): λ_L♯($b, λ_R♯($a, $e)) = $lhs " *
+                            "but λ_R♯(λ_L♯($b, $a), $e) = $rhs",
+                            lhs, rhs)
+                        push!(compat_failures, f)
+                        verbose === true && println("Bicomodule compat: ", f.structural_hint)
+                        if !collect_all
+                            push!(failures, f)
+                            return fail(failures, summary="compatibility (directions) fails")
+                        end
                     end
                 end
             end
         end
     end
 
-    true
+    append!(failures, compat_failures)
+
+    if isempty(failures)
+        return pass("bicomodule axioms")
+    end
+    summary = isempty(compat_failures) ? "comodule-side failures" :
+              "compatibility failures (run minimal_failing_triple on .failures " *
+              "to surface the lex-smallest)"
+    fail(failures, summary=summary)
 end

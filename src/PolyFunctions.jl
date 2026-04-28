@@ -28,9 +28,25 @@ PolyFunction(dom, cod, f) = PolyFunction(dom, cod, f, nothing)
 
 The maximum domain size at which a `PolyFunction` will be tabulated or
 compared extensionally without an explicit opt-in. Defaults to `10^5`.
-Mutate the `[]` slot to raise or lower the cap globally.
+Mutate via [`set_tabulate_cap!`](@ref); reading via `TABULATE_SIZE_CAP[]`
+is still supported.
 """
 const TABULATE_SIZE_CAP = Ref{Int}(10^5)
+
+"""
+    set_tabulate_cap!(n::Int) -> Int
+
+Set the global [`TABULATE_SIZE_CAP`](@ref) and return the previous value.
+Use this in scripts that legitimately need to operate on larger domains
+than the default `10^5`. Prefer `force=true` on a single `tabulate` call
+when raising the cap globally would be too coarse.
+"""
+function set_tabulate_cap!(n::Int)
+    n ≥ 0 || throw(ArgumentError("set_tabulate_cap!: cap must be nonnegative; got $n"))
+    old = TABULATE_SIZE_CAP[]
+    TABULATE_SIZE_CAP[] = n
+    old
+end
 
 """
     tabulate(pf::PolyFunction; force=false) -> PolyFunction
@@ -43,9 +59,21 @@ function tabulate(pf::PolyFunction; force=false)
     c = cardinality(pf.dom)
     c isa Finite || error("Cannot tabulate function with non-finite domain (cardinality $c). " *
                           "Pass force=true if you really mean to enumerate it.")
-    !force && c.n > TABULATE_SIZE_CAP[] &&
-        error("Domain has $(c.n) elements (> TABULATE_SIZE_CAP[] = $(TABULATE_SIZE_CAP[])). " *
-              "Pass force=true to override.")
+    if !force && c.n > TABULATE_SIZE_CAP[]
+        error("""
+              Domain has $(c.n) elements (> TABULATE_SIZE_CAP[] = $(TABULATE_SIZE_CAP[])).
+
+              Options to proceed:
+                1. Pass `force = true` to tabulate this function anyway.
+                2. Raise the global cap: `Poly.set_tabulate_cap!($(c.n) + 1)`
+                   (or to whatever ceiling fits the workload).
+                3. If you're comparing two functions for equality, see whether a
+                   structural predicate fits — e.g. `is_subst_of` for substitution
+                   polynomials avoids enumeration entirely.
+                4. Build the function manually as a `Dict`-backed `PolyFunction`
+                   and pass it directly, skipping tabulation.
+              """)
+    end
     pf.dom isa FinPolySet ||
         error("Tabulation only supported for FinPolySet domains; got $(typeof(pf.dom)).")
     pf.table = Dict(x => pf.f(x) for x in pf.dom)

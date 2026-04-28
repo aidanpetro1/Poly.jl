@@ -47,11 +47,12 @@ export
     ProductSet, SumSet, ExpSet, SymbolicSet, cardinality,
 
     # PolyFunction / DependentFunction
-    PolyFunction, tabulate, untabulate, identity_polyfunction, TABULATE_SIZE_CAP,
+    PolyFunction, tabulate, untabulate, identity_polyfunction,
+    TABULATE_SIZE_CAP, set_tabulate_cap!,
     DependentFunction, indexed_family,
 
     # Polynomial
-    Polynomial, positions, direction_at,
+    AbstractPolynomial, ConcretePolynomial, Polynomial, positions, direction_at,
     y, zero_poly, one_poly,
     constant, linear, monomial, representable,
     is_constant, is_linear, is_monomial, is_representable,
@@ -70,6 +71,25 @@ export
     # `Monoidal.jl` for the rationale.
     var"▷", subst, subst_n,
 
+    # Lazy composition product (Extensions v1, PR #1). Use `subst_lazy` when
+    # building bicomodules or chaining substitutions to defer the
+    # `Σ_i |q|^|p[i]|` enumeration until truly needed; call `materialize` to
+    # force the eager `Polynomial` form. `is_subst_of` checks shape equality
+    # without enumeration — used by `Bicomodule`'s constructor.
+    LazySubst, subst_lazy, materialize, is_subst_of,
+
+    # Convenience constructors for lenses targeting subst(p, q) (PR #5).
+    # `subst_targeted_lens` accepts the natural-shape position and direction
+    # callbacks; `subst_targeted_coaction` pre-fills the (p, q) operands
+    # based on which side of a bicomodule the coaction lives on.
+    subst_targeted_lens, subst_targeted_coaction,
+
+    # n-ary flat coproduct (Extensions v1, PR #3). `coproduct(p1, ..., pn)`
+    # produces flat `(k, x)` tags rather than the nested left-associated
+    # form of `p1 + p2 + ... + pn`. `flatten_coproduct` re-tags an existing
+    # binary-`+` chain into the flat form (with structural-detection caveats).
+    coproduct, flatten_coproduct,
+
     # Closure of ⊗, sections, derivative (Sprint 5)
     internal_hom, sections, section_lens, do_nothing_section,
     eval_lens, derivative,
@@ -81,6 +101,16 @@ export
     initial_state, trajectory, output_trajectory,
     state_output_trajectory, juxtapose, wrap,
 
+    # First-class Coalgebra (Extensions v1, PR #4). Peer type to Comonoid /
+    # Bicomodule for coalgebras of an *endofunctor* (no laws beyond shape;
+    # comodules are different beasts, see RightComodule etc.). Existing
+    # `state_system`, `dynamical_system`, `moore_machine` keep returning
+    # `Lens` — wrap in `Coalgebra(::Lens)` for the typed object.
+    Coalgebra, CoalgebraMorphism, to_lens,
+    moore_machine_coalgebra,
+    validate_coalgebra, validate_coalgebra_detailed,
+    validate_coalgebra_morphism, validate_coalgebra_morphism_detailed,
+
     # Comonoids = categories (Sprint 7)
     Comonoid, SmallCategory, Retrofunctor,
     to_category, from_category,
@@ -89,12 +119,31 @@ export
     state_system_comonoid, discrete_comonoid, monoid_comonoid,
     identity_retrofunctor,
 
+    # Validation results (Extensions v1, PR #6). Public `validate_*` return
+    # `Bool` for back-compat with `@test` and existing call sites. Each has
+    # a `validate_*_detailed` companion returning the structured
+    # `ValidationResult` with per-failure detail (`law`, `location`,
+    # `structural_hint`, `actual`, `expected`).
+    ValidationResult, ValidationFailure, minimal_failing_triple,
+    validate_category_laws_detailed, validate_comonoid_detailed,
+    validate_retrofunctor_detailed,
+
     # Cofree comonoid + comodules + bicomodules (Sprint 8)
     BehaviorTree, behavior_trees, tree_paths, tree_walk,
     cofree_comonoid, cofree_unit, cofree_universal,
-    RightComodule, regular_right_comodule, validate_right_comodule,
-    LeftComodule, regular_left_comodule, validate_left_comodule,
-    Bicomodule, regular_bicomodule, validate_bicomodule,
+    RightComodule, regular_right_comodule,
+    validate_right_comodule, validate_right_comodule_detailed,
+    LeftComodule, regular_left_comodule,
+    validate_left_comodule, validate_left_comodule_detailed,
+    Bicomodule, regular_bicomodule,
+    validate_bicomodule, validate_bicomodule_detailed,
+
+    # Bicomodule composition (Extensions v1, PR #2). The Unicode `⊙`
+    # alias gives book-style infix; `compose` is the named form. The
+    # Comonoid-arithmetic operators `+`, `*`, `⊗` lift through `Base`'s
+    # operator infrastructure, no fresh exports needed beyond what
+    # already gets re-exported via `import Base: +, *`.
+    var"⊙",
 
     # Macros
     @poly,
@@ -107,6 +156,9 @@ export
     sym_y, sym_zero, sym_one, sympoly, symlens, sym_id,
     parallel,
     lift, evaluate, simplify, sym_equal,
+    # Intent-revealing aliases (Extensions v1, PR #8) — same semantics as
+    # `lift` / `evaluate`, names spelled out for boundary-crossing calls.
+    to_symbolic, to_concrete,
     Rule, rules,
     to_latex, latex_display
 
@@ -117,6 +169,10 @@ include("Polynomial.jl")
 include("Lens.jl")
 include("Monoidal.jl")
 include("Closure.jl")
+# Validation types — referenced by Dynamical.jl (Coalgebra) and the
+# comonoid/comodule validators. Must precede everything that uses
+# `ValidationResult`, `ValidationFailure`, etc.
+include("Validation.jl")
 include("Dynamical.jl")
 include("Comonoid.jl")
 include("Cofree.jl")

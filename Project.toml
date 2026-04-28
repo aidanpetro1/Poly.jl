@@ -1,7 +1,7 @@
 name = "Poly"
 uuid = "c6ac206a-14ad-4e46-bdab-7d10e8cbd250"
 authors = ["Aidan Petrovich <aidanpetrovich@gmail.com>"]
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 

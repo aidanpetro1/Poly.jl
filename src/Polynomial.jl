@@ -3,7 +3,26 @@
 # ============================================================
 
 """
-    Polynomial(positions, direction_at)
+    AbstractPolynomial
+
+Supertype for all polynomial-functor representations in this package.
+Subtypes must support the *polynomial interface*:
+
+  - `positions(p)` returns the position-set `p(1)` as a `PolySet`.
+  - `direction_at(p, i)` returns the direction-set `p[i]` as a `PolySet`
+    for each position `i ∈ p(1)`.
+
+The default implementation is [`ConcretePolynomial`](@ref) — a struct that
+materializes both pieces. Lazy variants (e.g. [`LazySubst`](@ref)) defer
+enumeration until the interface is queried.
+
+The public name `Polynomial` is a `const` alias for `ConcretePolynomial`,
+so existing code continues to work unchanged.
+"""
+abstract type AbstractPolynomial end
+
+"""
+    ConcretePolynomial(positions, direction_at)
 
 A polynomial functor `p : Set → Set` represented by its position-set
 `p(1) = positions` together with the indexed family of direction-sets
@@ -15,15 +34,27 @@ following Niu & Spivak Definition 2.1 / Proposition 2.6.
 
 `direction_at` is a `DependentFunction` whose body returns a `PolySet` for
 each position. Use [`indexed_family`](@ref) when you have just a callable.
+
+Aliased as [`Polynomial`](@ref) for the public API. New code that needs to
+admit lazy polynomials should dispatch on [`AbstractPolynomial`](@ref).
 """
-struct Polynomial
+struct ConcretePolynomial <: AbstractPolynomial
     positions::PolySet
     direction_at::DependentFunction
-    function Polynomial(pos::PolySet, dat::DependentFunction)
+    function ConcretePolynomial(pos::PolySet, dat::DependentFunction)
         dat.dom == pos || error("direction_at domain $(dat.dom) ≠ positions $pos")
         new(pos, dat)
     end
 end
+
+"""
+    Polynomial
+
+Public alias for [`ConcretePolynomial`](@ref). Methods typed on `::Polynomial`
+dispatch on the concrete representation; methods that should accept lazy
+variants (e.g. [`LazySubst`](@ref)) take `::AbstractPolynomial`.
+"""
+const Polynomial = ConcretePolynomial
 
 """
     Polynomial(positions, dir_at_fn::Function)
@@ -33,10 +64,13 @@ Convenience constructor. `dir_at_fn` is a plain callable `i ↦ PolySet`.
 Polynomial(pos::PolySet, dir_at_fn::Function) =
     Polynomial(pos, indexed_family(pos, dir_at_fn))
 
-"`p(1)` — the set of positions of `p`."
+"`p(1)` — the set of positions of `p`. Falls through to the field on
+`ConcretePolynomial`; lazy subtypes provide their own method."
 positions(p::Polynomial) = p.positions
 
-"`p[i]` — the direction-set of `p` at position `i`."
+"`p[i]` — the direction-set of `p` at position `i`. Falls through to the
+stored `DependentFunction` on `ConcretePolynomial`; lazy subtypes provide
+their own method."
 direction_at(p::Polynomial, i) = p.direction_at(i)
 
 # Special polynomials -------------------------------------------------
