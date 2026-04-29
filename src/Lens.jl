@@ -3,7 +3,7 @@
 # ============================================================
 
 """
-    Lens(dom::Polynomial, cod::Polynomial,
+    Lens(dom::Polynomial, cod::AbstractPolynomial,
          on_positions::PolyFunction, on_directions::DependentFunction)
 
 A dependent lens `f : dom → cod` between two polynomials, characterized
@@ -15,16 +15,22 @@ A dependent lens `f : dom → cod` between two polynomials, characterized
 
 Lenses are the morphisms of the category **Poly**.
 
+`cod` is typed as `AbstractPolynomial` so that lazy variants
+([`LazySubst`](@ref)) can flow through the lens layer without forcing
+enumeration. The `dom` remains a [`Polynomial`](@ref) (concrete) because
+positions of `dom` are iterated frequently.
+
 Access fields directly: `f.on_positions`, `f.on_directions`.
 """
 struct Lens
     dom::Polynomial
-    cod::Polynomial
+    cod::AbstractPolynomial
     on_positions::PolyFunction
     on_directions::DependentFunction
-    function Lens(dom, cod, on_pos::PolyFunction, on_dir::DependentFunction)
+    function Lens(dom::Polynomial, cod::AbstractPolynomial,
+                  on_pos::PolyFunction, on_dir::DependentFunction)
         on_pos.dom == dom.positions || error("on_positions domain $(on_pos.dom) ≠ dom.positions $(dom.positions)")
-        on_pos.cod == cod.positions || error("on_positions codomain $(on_pos.cod) ≠ cod.positions $(cod.positions)")
+        on_pos.cod == positions(cod) || error("on_positions codomain $(on_pos.cod) ≠ cod.positions $(positions(cod))")
         on_dir.dom == dom.positions || error("on_directions domain $(on_dir.dom) ≠ dom.positions $(dom.positions)")
         new(dom, cod, on_pos, on_dir)
     end
@@ -38,8 +44,9 @@ Convenience constructor.
 - `on_dir_fn(i, b)` returns a `dom[i]`-direction for each `i ∈ dom(1)` and
   `b ∈ cod[on_pos_fn(i)]`.
 """
-function Lens(dom::Polynomial, cod::Polynomial, on_pos_fn::Function, on_dir_fn::Function)
-    on_pos = PolyFunction(dom.positions, cod.positions, on_pos_fn)
+function Lens(dom::Polynomial, cod::AbstractPolynomial, on_pos_fn::Function, on_dir_fn::Function)
+    cod_pos = positions(cod)
+    on_pos = PolyFunction(dom.positions, cod_pos, on_pos_fn)
     on_dir = DependentFunction(
         dom.positions,
         i -> ExpSet(direction_at(dom, i), direction_at(cod, on_pos_fn(i))),
@@ -81,7 +88,7 @@ the reverse direction makes sense because both go backward).
 Per Niu & Spivak Exercise 3.49 / Proposition 3.50.
 """
 function compose(f::Lens, g::Lens)
-    f.cod == g.dom || error("Cannot compose: cod(f) = $(f.cod) ≠ dom(g) = $(g.dom)")
+    _struct_equal(f.cod, g.dom) || error("Cannot compose: cod(f) = $(f.cod) ≠ dom(g) = $(g.dom)")
     p, _, r = f.dom, f.cod, g.cod
 
     h_on_pos_fn = i -> g.on_positions.f(f.on_positions.f(i))
@@ -99,8 +106,11 @@ function compose(f::Lens, g::Lens)
         end
     )
 
+    # Use the `positions` accessor on `r` rather than `r.positions`: when
+    # `g.cod` is a lazy variant (e.g. `LazySubst`) the field doesn't exist;
+    # the accessor is the `AbstractPolynomial` interface contract.
     Lens(p, r,
-         PolyFunction(p.positions, r.positions, h_on_pos_fn),
+         PolyFunction(p.positions, positions(r), h_on_pos_fn),
          h_on_dir)
 end
 
@@ -117,7 +127,7 @@ functions agree at every position.
 """
 function ==(f::Lens, g::Lens)
     f.dom == g.dom || return false
-    f.cod == g.cod || return false
+    _struct_equal(f.cod, g.cod) || return false
     f.on_positions == g.on_positions || return false
     p = f.dom
     p.positions isa FinPolySet || error("Lens equality requires a FinPolySet position-set.")
@@ -141,7 +151,12 @@ transformation (Niu & Spivak Proposition 3.44):
 """
 function (f::Lens)(X::PolySet)
     domX = f.dom(X)
-    codX = f.cod(X)
+    # The cod may be a lazy variant (e.g. LazySubst); materialize-on-demand
+    # for the apply path. Lens-as-natural-transformation is rarely on the hot
+    # path of bicomodule construction, so paying the materialization cost
+    # only when this method is actually called is acceptable.
+    cod_concrete = f.cod isa ConcretePolynomial ? f.cod : materialize(f.cod)
+    codX = cod_concrete(X)
     PolyFunction(domX, codX, ig -> begin
         (i, g) = ig
         j = f.on_positions.f(i)

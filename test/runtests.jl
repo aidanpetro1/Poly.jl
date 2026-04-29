@@ -1265,5 +1265,6 @@ using .Poly
     include("test_extensions_monoidal_ops.jl")
     include("test_extensions_subst_targeted.jl")
     include("test_extensions_interop.jl")
+    include("test_extensions_lazy_lens_cod.jl")
 
 end  # outer @testset "Poly.jl"

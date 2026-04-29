@@ -345,6 +345,15 @@ function lift(p::Polynomial; name::Union{Symbol,Nothing}=nothing)
     SymbolicPolynomial(SymLit(p))
 end
 
+# Fallback for non-Concrete `AbstractPolynomial` (e.g. `LazySubst`): the
+# symbolic layer expects a concrete value to wrap as `SymLit`, so
+# materialize first. This is invoked when `lift(f::Lens)` runs on a lens
+# whose `cod` is a lazy variant — uncommon in practice but kept for safety.
+function lift(p::AbstractPolynomial; name::Union{Symbol,Nothing}=nothing)
+    name !== nothing && return SymbolicPolynomial(SymVar(name, :Polynomial))
+    lift(materialize(p))
+end
+
 """
     lift(f::Lens; name::Symbol=:f) -> SymbolicLens
 
@@ -809,6 +818,14 @@ function to_latex(p::Polynomial)
         end
     end
     join(parts, " + ")
+end
+
+# Fallback for non-Concrete `AbstractPolynomial` (e.g. `LazySubst`). The
+# canonical-form summary requires iterating the position-set, which is
+# intentionally not supported for lazy variants. Prefer to render the
+# substitution shape directly: `p ▷ q`.
+function to_latex(p::LazySubst)
+    "(" * to_latex(p.p) * " \\triangleleft " * to_latex(p.q) * ")"
 end
 
 """

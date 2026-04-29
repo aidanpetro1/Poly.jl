@@ -566,6 +566,27 @@ end
 ==(a::SubstPolySet, b::SubstPolySet) =
     _struct_equal(a.p, b.p) && _struct_equal(a.q, b.q)
 
+# Cross-type equality with `FinPolySet`: materialize the SubstPolySet by
+# computing the eager `subst(p, q).positions` and structurally compare.
+#
+# Why this is needed: after `Lens.cod` widened to `AbstractPolynomial`, a
+# `Lens` with a lazy `cod` carries an `on_positions::PolyFunction` whose
+# `cod` is a `SubstPolySet`, while an equivalent eager-`cod` lens carries
+# a `FinPolySet`. `PolyFunction.==` checks set equality on its `cod`
+# field, so without this method the two lenses (semantically equal)
+# would be unequal — which broke `validate_retrofunctor` after the
+# Comonoid duplicators went lazy.
+#
+# Cost: this materializes the eager subst position-set on each
+# comparison. That's the same enumeration cost the eager construction
+# would have paid; it only fires when the two PolyFunctions disagree on
+# cod-type, which is the lazy-vs-eager boundary.
+function ==(s::SubstPolySet, f::FinPolySet)
+    (s.p isa ConcretePolynomial && s.q isa ConcretePolynomial) || return false
+    subst(s.p, s.q).positions == f
+end
+==(f::FinPolySet, s::SubstPolySet) = s == f
+
 # Structural equality on `AbstractPolynomial`s as used by lazy bookkeeping:
 # two concretes compare by `==` (full structural); anything else falls
 # back to identity here. The `LazySubst`-specific method is added below
@@ -575,6 +596,13 @@ end
 # only needs its own method here.
 _struct_equal(p::ConcretePolynomial, q::ConcretePolynomial) = p == q
 _struct_equal(p::AbstractPolynomial, q::AbstractPolynomial) = p === q
+
+# Cross-type structural equality: when comparing a lazy variant with its
+# concrete counterpart we materialize and structurally compare. Used by
+# `compose(::Lens, ::Lens)` and `==(::Lens, ::Lens)` after `Lens.cod` was
+# widened to `AbstractPolynomial` — those call sites must accept the case
+# where one side has gone through `subst_lazy` and the other through
+# eager `subst`.
 
 hash(s::SubstPolySet, h::UInt) =
     hash((:SubstPolySet, _struct_hash(s.p), _struct_hash(s.q)), h)
@@ -623,6 +651,11 @@ end
 # keeps the dispatch story clean (one method per concrete subtype).
 _struct_equal(p::LazySubst, q::LazySubst) =
     _struct_equal(p.p, q.p) && _struct_equal(p.q, q.q)
+# Cross-type: a LazySubst is structurally-equal to a ConcretePolynomial iff
+# materializing the lazy form yields the concrete form. Delegating to `==`
+# (which has matching cross-type methods) keeps the rule in one place.
+_struct_equal(p::LazySubst, q::ConcretePolynomial) = p == q
+_struct_equal(p::ConcretePolynomial, q::LazySubst) = p == q
 # Hash must mirror the recursive equality so == / hash invariants hold for
 # Dict / Set: structurally-equal LazySubsts (with structurally-equal
 # operands at every level) hash the same.
@@ -706,6 +739,18 @@ end
 materialize(p::ConcretePolynomial) = p   # idempotent on concrete
 
 ==(a::LazySubst, b::LazySubst) = _struct_equal(a.p, b.p) && _struct_equal(a.q, b.q)
+
+# Cross-type equality with `ConcretePolynomial`: materialize the lazy side
+# and delegate to structural Polynomial `==`. This keeps backward
+# compatibility with tests/asserts of the form `lens.cod == subst(p, q)`
+# after `Lens.cod` was widened to `AbstractPolynomial`.
+#
+# This forces enumeration on the lazy side, which is the same cost the
+# eager construction would have paid. Bicomodule construction itself
+# avoids this path by going through `is_subst_of`; this method only
+# kicks in for explicit `==` comparisons against a concrete polynomial.
+==(a::LazySubst, b::ConcretePolynomial) = materialize(a) == b
+==(a::ConcretePolynomial, b::LazySubst) = a == materialize(b)
 
 hash(s::LazySubst, h::UInt) = hash((:LazySubst, _struct_hash(s.p), _struct_hash(s.q)), h)
 
@@ -961,3 +1006,42 @@ end
 # (included after this file in `Poly.jl`'s top-level), so the function
 # itself lives in `Cofree.jl` near `regular_bicomodule`. Reach for it
 # when building a bicomodule's coaction lens.
+
+# ============================================================
+# AbstractPolynomial fallbacks for monoidal operators
+# ============================================================
+#
+# After widening `Lens.cod` to `AbstractPolynomial`, the lens-bifunctor
+# methods in this file (e.g. `+(::Lens, ::Lens)`, `*(::Lens, ::Lens)`,
+# `parallel(::Lens, ::Lens)`, `subst(::Lens, ::Lens)`,
+# `coproduct(::Lens...)`) take products of cods that may now be lazy
+# (`LazySubst`). The eager Polynomial-on-Polynomial implementations above
+# don't dispatch on `LazySubst`. Rather than duplicate the implementations,
+# we provide fallback methods on `AbstractPolynomial` that materialize the
+# lazy operands first, then delegate to the eager forms.
+#
+# Dispatch ordering: `Polynomial = ConcretePolynomial <: AbstractPolynomial`,
+# so a `(ConcretePolynomial, ConcretePolynomial)` call still picks the
+# concrete-typed method above (no behavioral change). Only mixed or
+# fully-lazy calls hit these fallbacks.
+#
+# Cost: materialization is the same enumeration cost the eager form would
+# have paid anyway. The lazy advantage is preserved for `Bicomodule` /
+# `subst_lazy` paths that don't go through these operators.
+
+_to_concrete(p::ConcretePolynomial) = p
+_to_concrete(p::AbstractPolynomial) = materialize(p)
+
++(p::AbstractPolynomial, q::AbstractPolynomial) =
+    _to_concrete(p) + _to_concrete(q)
+
+*(p::AbstractPolynomial, q::AbstractPolynomial) =
+    _to_concrete(p) * _to_concrete(q)
+
+parallel(p::AbstractPolynomial, q::AbstractPolynomial) =
+    parallel(_to_concrete(p), _to_concrete(q))
+
+subst(p::AbstractPolynomial, q::AbstractPolynomial) =
+    subst(_to_concrete(p), _to_concrete(q))
+
+coproduct(ps::AbstractPolynomial...) = coproduct((_to_concrete(p) for p in ps)...)

@@ -230,7 +230,13 @@ function from_category(C::SmallCategory)
         C.composition[(f, g)][2]
     end
 
-    duplicator = Lens(carrier, subst(carrier, carrier),
+    # Use `subst_lazy` to avoid enumerating the substitution polynomial,
+    # which has Σ_i |carrier(1)|^|carrier[i]| positions. With `Lens.cod`
+    # widened to `AbstractPolynomial` and the `Comonoid` constructor's
+    # cod-check going through `is_subst_of`, downstream consumption stays
+    # lazy. Categorical-bridge `+`, `*`, `⊗` on `Comonoid` (which all go
+    # through `from_category`) inherit the fix automatically.
+    duplicator = Lens(carrier, subst_lazy(carrier, carrier),
                       dup_on_pos, dup_on_dir)
 
     Comonoid(carrier, eraser, duplicator)
@@ -700,7 +706,13 @@ function state_system_comonoid(S::PolySet)
 
     dup_on_pos = s -> (s, Dict(t => t for t in S.elements))
     dup_on_dir = (s, ab) -> ab[2]
-    duplicator = Lens(carrier, subst(carrier, carrier),
+    # Use `subst_lazy` to avoid enumerating the substitution polynomial,
+    # which has Σ_i |carrier(1)|^|carrier[i]| positions. With `Lens.cod`
+    # widened to `AbstractPolynomial` and the `Comonoid` constructor's
+    # cod-check going through `is_subst_of`, downstream consumption stays
+    # lazy. Categorical-bridge `+`, `*`, `⊗` on `Comonoid` (which all go
+    # through `from_category`) inherit the fix automatically.
+    duplicator = Lens(carrier, subst_lazy(carrier, carrier),
                       dup_on_pos, dup_on_dir)
 
     Comonoid(carrier, eraser, duplicator)
@@ -728,7 +740,13 @@ function discrete_comonoid(S::PolySet)
 
     dup_on_pos = s -> (s, Dict(:pt => s))
     dup_on_dir = (_, _ab) -> :pt
-    duplicator = Lens(carrier, subst(carrier, carrier),
+    # Use `subst_lazy` to avoid enumerating the substitution polynomial,
+    # which has Σ_i |carrier(1)|^|carrier[i]| positions. With `Lens.cod`
+    # widened to `AbstractPolynomial` and the `Comonoid` constructor's
+    # cod-check going through `is_subst_of`, downstream consumption stays
+    # lazy. Categorical-bridge `+`, `*`, `⊗` on `Comonoid` (which all go
+    # through `from_category`) inherit the fix automatically.
+    duplicator = Lens(carrier, subst_lazy(carrier, carrier),
                       dup_on_pos, dup_on_dir)
 
     Comonoid(carrier, eraser, duplicator)
@@ -760,7 +778,13 @@ function monoid_comonoid(M::PolySet, e, op::Function)
 
     dup_on_pos = _ -> (:pt, Dict(m => :pt for m in M.elements))
     dup_on_dir = (_, ab) -> op(ab[1], ab[2])
-    duplicator = Lens(carrier, subst(carrier, carrier),
+    # Use `subst_lazy` to avoid enumerating the substitution polynomial,
+    # which has Σ_i |carrier(1)|^|carrier[i]| positions. With `Lens.cod`
+    # widened to `AbstractPolynomial` and the `Comonoid` constructor's
+    # cod-check going through `is_subst_of`, downstream consumption stays
+    # lazy. Categorical-bridge `+`, `*`, `⊗` on `Comonoid` (which all go
+    # through `from_category`) inherit the fix automatically.
+    duplicator = Lens(carrier, subst_lazy(carrier, carrier),
                       dup_on_pos, dup_on_dir)
 
     Comonoid(carrier, eraser, duplicator)

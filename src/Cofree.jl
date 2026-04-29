@@ -509,7 +509,11 @@ they're checked.
 function cofree_universal(c::Comonoid, labeling::Lens, depth::Int)
     labeling.dom == c.carrier ||
         error("cofree_universal: labeling.dom ≠ c.carrier")
-    p = labeling.cod
+    # Materialize a lazy cod (rare here — labelings are typically built
+    # eagerly) so the rest of this function can use the concrete-polynomial
+    # interface (`p.positions`, `_tree_for_position` walking children, etc.).
+    p_raw = labeling.cod
+    p = p_raw isa ConcretePolynomial ? p_raw : materialize(p_raw)
     p.positions isa FinPolySet ||
         error("cofree_universal: labeling.cod must have FinPolySet positions")
 
@@ -1128,7 +1132,7 @@ function _comonoid_carrier_tensor(c::Comonoid, d::Comonoid)
         d_dir = d.duplicator.on_directions.f(t).f((a2, b2))
         (c_dir, d_dir)
     end
-    new_dup = Lens(new_carrier, subst(new_carrier, new_carrier),
+    new_dup = Lens(new_carrier, subst_lazy(new_carrier, new_carrier),
                    new_dup_on_pos, new_dup_on_dir)
 
     Comonoid(new_carrier, new_eraser, new_dup)
@@ -1188,7 +1192,7 @@ function parallel(M::Bicomodule, N::Bicomodule)
         n_dir = N.left_coaction.on_directions.f(n_pos).f((a2, b2))
         (m_dir, n_dir)
     end
-    new_left_coaction = Lens(new_carrier, subst(cL, new_carrier),
+    new_left_coaction = Lens(new_carrier, subst_lazy(cL, new_carrier),
                               new_left_pos, new_left_dir)
 
     # Right coaction: (m_pos, n_pos) ↦ ((m_pos, n_pos), mbar_combined)
@@ -1214,7 +1218,7 @@ function parallel(M::Bicomodule, N::Bicomodule)
         n_dir = N.right_coaction.on_directions.f(n_pos).f((a2, b2))
         (m_dir, n_dir)
     end
-    new_right_coaction = Lens(new_carrier, subst(new_carrier, cR),
+    new_right_coaction = Lens(new_carrier, subst_lazy(new_carrier, cR),
                                new_right_pos, new_right_dir)
 
     Bicomodule(new_carrier, new_left_base, new_right_base,
