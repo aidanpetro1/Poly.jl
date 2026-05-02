@@ -96,20 +96,18 @@
     # Not-yet-implemented paths error with clear messages
     # ============================================================
 
-    @testset ":right Kan errors with v0.3.x pointer" begin
+    @testset ":right Kan with identity D works (v0.3.1)" begin
         S = FinPolySet([:a])
         cs = state_system_comonoid(S)
         M = regular_bicomodule(cs)
         D = regular_bicomodule(cs)
-        # The error should mention v0.3.x in its message.
-        err = nothing
-        try
-            kan_along_bicomodule(D, M; direction=:right)
-        catch e
-            err = e
-        end
-        @test err isa ErrorException
-        @test occursin("v0.3.x", err.msg)
+        # As of v0.3.1, right-Kan ships for identity D and finite
+        # non-identity D. The identity case returns M unchanged with
+        # an identity counit.
+        k = kan_along_bicomodule(D, M; direction=:right)
+        @test k isa KanExtension
+        @test k.direction === :right
+        @test k.extension === M
     end
 
     @testset "kan_2cat non-identity D errors with clear message" begin
@@ -173,12 +171,15 @@
         @test k1.extension.carrier == k2.extension.carrier
     end
 
-    @testset "Π_D unicode alias errors (right Kan not yet impl)" begin
+    @testset "Π_D unicode alias works (right Kan, identity D, v0.3.1)" begin
         S = FinPolySet([:a])
         cs = state_system_comonoid(S)
         M = regular_bicomodule(cs)
         D = regular_bicomodule(cs)
-        @test_throws ErrorException Poly.var"Π_D"(D, M)
+        k = Poly.var"Π_D"(D, M)
+        @test k isa KanExtension
+        @test k.direction === :right
+        @test k.extension === M    # identity D: Π_D M ≅ M
     end
 
     # ============================================================

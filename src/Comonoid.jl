@@ -459,7 +459,7 @@ joint = parallel(cs, ct)
 @assert validate_comonoid(joint)
 ```
 """
-function parallel(c::Comonoid, d::Comonoid)
+function parallel(c::Comonoid, d::Comonoid; validate::Bool=true)
     new_carrier = parallel(c.carrier, d.carrier)
 
     new_eraser = Lens(new_carrier, y,
@@ -502,11 +502,50 @@ function parallel(c::Comonoid, d::Comonoid)
     # `_comonoid_carrier_tensor` did not validate; the public surface does.
     # If both inputs are valid comonoids the result is valid by
     # construction, so this catches operand bugs rather than its own.
-    validate_comonoid(result) ||
-        error("parallel(::Comonoid, ::Comonoid): result failed " *
-              "validate_comonoid; operands likely invalid")
+    #
+    # `validate=false` opt-out (v0.3.1, watch-list item from extensions
+    # v2 progress notes): when this is being called repeatedly inside a
+    # hot path (e.g. `parallel(::Bicomodule, ::Bicomodule)` building
+    # tensored bases that get validated again as part of the bicomodule
+    # construction), the redundant validation can be skipped. The
+    # Bicomodule path now opts out and lets the bicomodule validator
+    # catch any structural issues downstream.
+    if validate
+        validate_comonoid(result) ||
+            error("parallel(::Comonoid, ::Comonoid): result failed " *
+                  "validate_comonoid; operands likely invalid")
+    end
 
     result
+end
+
+"""
+    parallel(c1::Comonoid, c2::Comonoid, c3::Comonoid, more::Comonoid...; validate=true)
+    -> Comonoid
+
+n-ary parallel (carrier-tensor) of three or more comonoids. Left-folds
+binary `parallel`; the result's carrier is the iterated `parallel(p1, p2, ..., pn)`
+on the polynomial carriers (positions are flat n-tuples for the
+underlying `parallel(::Polynomial, ...)`-fold; same encoding as repeated
+binary application).
+
+Validates the final result; pass `validate=false` to skip.
+"""
+function parallel(c1::Comonoid, c2::Comonoid, c3::Comonoid, more::Comonoid...;
+                  validate::Bool=true)
+    # Build with `validate=false` for the intermediate folds; only validate
+    # the final result. Saves repeated validation work for long chains.
+    acc = parallel(c1, c2; validate=false)
+    acc = parallel(acc, c3; validate=false)
+    for c in more
+        acc = parallel(acc, c; validate=false)
+    end
+    if validate
+        validate_comonoid(acc) ||
+            error("parallel(::Comonoid, ::Comonoid, ...) n-ary: " *
+                  "result failed validate_comonoid; operands likely invalid")
+    end
+    acc
 end
 
 # ============================================================
@@ -630,7 +669,23 @@ free_category_comonoid([:A, :B, :C],
 ```
 """
 function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
-                                max_depth::Union{Int,Nothing}=nothing)
+                                max_depth::Union{Int,Nothing}=nothing,
+                                _from_transition_shim::Bool=false)
+    # Extensions v0.3.x deprecation: `free_category_comonoid` is superseded
+    # by `free_labeled_transition_comonoid`. The new builder uses
+    # `(src, label, tgt)` edge shape (PolyCDS-aligned) and `max_path_length`
+    # keyword. Direct calls to this function get a depwarn; the new builder
+    # passes `_from_transition_shim=true` to suppress the warning when it
+    # delegates here. Removed in v0.4.
+    if !_from_transition_shim
+        Base.depwarn(
+            "`free_category_comonoid(vertices, edges; max_depth)` is " *
+            "deprecated as of v0.3.1; use " *
+            "`free_labeled_transition_comonoid(positions, edges; max_path_length)` " *
+            "instead. Edge-tuple shape changes from `(src, tgt, label)` to " *
+            "`(src, label, tgt)`. To be removed in v0.4.",
+            :free_category_comonoid)
+    end
     # Deduplicate vertices; preserve order.
     seen = Set{Any}()
     verts = Any[]
@@ -740,6 +795,125 @@ function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
     cat = SmallCategory(FinPolySet(verts), morphisms_set,
                         morphism_dom, morphism_cod, morphism_identity, composition)
     from_category(cat)
+end
+
+# ============================================================
+# free_labeled_transition_comonoid (Extensions v0.3.x)
+# ============================================================
+#
+# Generalizes `free_category_comonoid` (PR #14, v0.3.0) and PolyCDS's
+# hand-rolled `as_protocol_smallcategory`. Same underlying free-category
+# construction, with PolyCDS-aligned naming:
+#
+#   * "positions" instead of "vertices" — fits the polynomial-theoretic
+#     vocabulary of carriers.
+#   * Edges as `(src, label, tgt)` triples (labeled transition system
+#     shape) — matches PolyCDS conventions. Two-tuple `(src, tgt)` is
+#     also accepted for ergonomics; auto-labels by edge index.
+#   * `max_path_length` keyword (was `max_depth`) — same semantics.
+#
+# `free_category_comonoid` is preserved as a deprecated shim through
+# v0.4 (depwarn forwarder; argument-order swap from `(src, tgt, label)`
+# to `(src, label, tgt)` and keyword translation handled internally).
+
+# Internal: normalize an edge for the transition shape into (src, label, tgt).
+# Two-tuples auto-label by their position in the edges vector.
+function _normalize_transition_edge(e, autolabel::Int)
+    if e isa Tuple
+        if length(e) == 2
+            return (e[1], autolabel, e[2])
+        elseif length(e) == 3
+            return (e[1], e[2], e[3])
+        end
+    end
+    error("free_labeled_transition_comonoid: edge $e has unexpected shape; " *
+          "expected (src, tgt) or (src, label, tgt) tuple")
+end
+
+"""
+    free_labeled_transition_comonoid(positions, edges; max_path_length=nothing) -> Comonoid
+
+Build the comonoid corresponding to the free category on a labeled
+transition graph. Canonical builder for `D` and `P_d` in the
+PolyCDS / Cat#-style modeling pattern; replaces both v0.3.0's
+`free_category_comonoid` and ad-hoc `as_protocol_smallcategory`-style
+builders.
+
+  - `positions` — an `AbstractVector` of position labels (vertices in
+    the underlying graph; objects of the resulting category).
+  - `edges` — a `Vector` of edge tuples in *(src, label, tgt)* shape
+    (labeled transition system convention). The two-tuple form
+    `(src, tgt)` is also accepted; missing labels are auto-generated
+    from the position of the edge in the vector.
+  - `max_path_length` — optional `Int`. Required when the graph
+    contains cycles; ignored for acyclic graphs. Caps the depth of
+    label-path concatenation.
+
+# Acyclic input
+
+Returns the full free category as a `Comonoid`. Morphisms are
+label-paths through the graph; identity at each position is the empty
+path; composition is path concatenation. Passes
+[`validate_comonoid`](@ref).
+
+```julia
+# Two states, three transitions: pour, drink, refill
+free_labeled_transition_comonoid(
+    [:full, :empty],
+    [(:full, :drink, :empty), (:empty, :refill, :full), (:full, :pour, :empty)])
+```
+
+# Cyclic input
+
+The free category on a cyclic graph is infinite, so this function
+truncates at `max_path_length` and emits an `@warn`. **The truncated
+result is not a valid free comonoid:** composites whose label-path
+length would exceed `max_path_length` are filled with a sentinel (the
+source identity), so the composition table stays total and
+[`validate_comonoid`](@ref) runs cleanly rather than throwing — but
+the sentinels register as category-law violations, which is the
+structural manifestation of "this isn't a valid free comonoid."
+
+```julia
+# Cyclic transition: full → empty → full
+free_labeled_transition_comonoid([:full, :empty],
+                                 [(:full, :drink, :empty),
+                                  (:empty, :refill, :full)];
+                                 max_path_length=3)
+```
+
+# Mixed labeled / unlabeled edges
+
+```julia
+free_labeled_transition_comonoid([:A, :B, :C],
+                                 [(:A, :forward, :B),  # labeled
+                                  (:B, :C),            # auto-labeled by index
+                                  (:A, :shortcut, :C)])
+```
+
+# Relation to `free_category_comonoid`
+
+`free_category_comonoid(vertices, edges; max_depth)` is the v0.3.0
+predecessor with `(src, tgt, label)` argument order and `max_depth`
+keyword. As of v0.3.1 it is deprecated and forwards to this function;
+removed in v0.4. Migration: swap edge-tuple positions 2 and 3, and
+rename `max_depth` to `max_path_length`.
+"""
+function free_labeled_transition_comonoid(positions::AbstractVector,
+                                          edges::AbstractVector;
+                                          max_path_length::Union{Int,Nothing}=nothing)
+    # Translate (src, label, tgt) edges into (src, tgt, label) shape and
+    # delegate to the underlying free-category builder. We keep
+    # `free_category_comonoid`'s core BFS/cycle logic; this function is
+    # a renaming + edge-tuple-shape adapter.
+    normalized_edges = Tuple[]
+    for (i, e) in enumerate(edges)
+        s, l, t = _normalize_transition_edge(e, i)
+        push!(normalized_edges, (s, t, l))
+    end
+    free_category_comonoid(positions, normalized_edges;
+                           max_depth=max_path_length,
+                           _from_transition_shim=true)
 end
 
 # ============================================================

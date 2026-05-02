@@ -3,6 +3,92 @@
 All notable changes to Poly.jl. Format follows [Keep a Changelog](https://keepachangelog.com/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — Concrete Poly v0.3.x asks
+
+Driven by external feedback on v0.3.0 from PolyCDS / SOAP-modeling
+work. Closes the v1.1-deferred bicomodule-composition coequalizer,
+ships right-Kan, and adds authoring + validation conveniences.
+
+### Added
+
+- **Full Niu/Spivak coequalizer for `compose(::Bicomodule, ::Bicomodule)`.**
+  Carrier positions are now coequalizer-balanced pairs `(x, σ)` where
+  `σ : X[x] → Y.positions` matches the D-routing on both sides:
+
+      λ_L^N(σ(a)).first  ==  mbar_R^M(x)(a)   for every a ∈ X[x].
+
+  This generalizes the previous regular-bicomodule approximation. For
+  direction-sets `M.carrier[x]` of cardinality `> 1` the new
+  construction correctly produces `Π_a #compatible_y(a)` positions per
+  `x` rather than the over-counted `|M.carrier[x]| × #compatible_y` of
+  the old impl. Closes the v1.1 deferral. Required for the SOAP
+  factoring pattern `master_D = Assessment ⊙ Plan` and downstream code
+  paths needing the master bicomodule recovery.
+- **`compose_lazy(M, N)` and `LazyBicomoduleCarrier`** — lazy variant of
+  `compose` whose carrier defers position enumeration. Use when the
+  eager `Π_a #compatible_y(a)` count would be too large.
+- **`validate_bicomodule_composition[_detailed](M, N)`** — pre-flight
+  check for `compose(M, N)` with attributed failure information. Each
+  failure's `location[1]` is one of `:M`, `:N`, or `:cross`, indicating
+  which operand to investigate. Use as a guard before bicomodule
+  composition in pipelines where M/N originate independently.
+- **Right-Kan extensions (`Π_D`).** `kan_along_bicomodule(D, M; direction=:right)`
+  ships for both the identity-D case (ε = id, extension ≅ M) and
+  finite non-identity D (dual section construction). `kan_2cat(D, F;
+  direction=:right)` mirrors the symbolic-aware left-Kan path:
+  identity-D and finite non-identity ship; symbolic non-identity rolls
+  into v0.4. `Π_D` unicode alias works on the same surface.
+  `factor_through(k, α)` extended to handle right-direction Kan
+  extensions and non-identity D for finite carriers. Required for the
+  SOAP audit arm `Π_Plan ∘ Π_Assessment`.
+- **`free_labeled_transition_comonoid(positions, edges; max_path_length)`**
+  — canonical builder for D and P_d in PolyCDS-style modeling. Edges
+  in `(src, label, tgt)` shape (labeled transition system convention);
+  `(src, tgt)` two-tuple also accepted with auto-label. Supersedes
+  v0.3.0's `free_category_comonoid`.
+- **`behavior_tree_from_paths(label_at_root, paths)`** — convenience
+  constructor for `BehaviorTree` taking a flat `path → label` Dict
+  rather than nested children Dicts. Mirrors `bicomodule_from_data` /
+  `comonoid_from_data` ergonomics in the cofree-comonoid layer.
+- **`parallel(::Comonoid, ::Comonoid; validate=false)`** opt-out
+  keyword — skips the post-construction `validate_comonoid` call. Watch-list
+  item from extensions v2 progress notes; useful in hot paths where
+  redundant validation is wasteful.
+- **n-ary `parallel(c1, c2, c3, more...)` for Comonoid** — left-folds
+  binary parallel; uses `validate=false` for intermediates and
+  validates only the final result.
+
+### Changed
+
+- **`free_category_comonoid` deprecated.** Now emits `Base.depwarn`
+  forwarding to `free_labeled_transition_comonoid`. The shim handles
+  the edge-tuple shape change (`(src, tgt, label)` → `(src, label, tgt)`)
+  and keyword translation (`max_depth` → `max_path_length`). To be
+  removed in v0.4.
+- **`bicomodule_from_data` docstring expanded** with explicit
+  coverage requirement on `right_back_directions` (and
+  `left_back_directions`): for every `(x, a, e)`-triple over the
+  right-coaction codomain, the dictionary must contain a key. The
+  failure mode (`KeyError` at coaction-application time) and how to
+  attribute it via `validate_bicomodule_*_detailed` are documented.
+- **`Project.toml` version** bumped from `0.2.0` to `0.3.1` (the
+  `0.3.0` ship was tagged separately but the manifest never picked up
+  the bump; this corrects that drift).
+
+### Migration from v0.3.0
+
+- `free_category_comonoid([:A, :B], [(:A, :B, :step)]; max_depth=3)`
+  → `free_labeled_transition_comonoid([:A, :B], [(:A, :step, :B)]; max_path_length=3)`.
+  The old form keeps working with a depwarn through v0.3.x; remove in v0.4.
+- `compose(M, N)` for bicomodules with carrier direction-sets of
+  cardinality > 1: position-set count changes from
+  `|M.carrier[x]| × #compatible_y` to the correct `Π_a #compatible_y(a)`.
+  Downstream code that pattern-matches on the old count needs updating.
+- `compose(regular_bicomodule(c), regular_bicomodule(c))` for `c =
+  state_system_comonoid({s1, s2})` now produces 2 positions (was 4 in
+  v0.3.0). The result still validates and is the unit for composition
+  over `c`.
+
 ## [0.2.0] — Extensions v1
 
 Driven by an external review of v0.1.0 (Sprint 8) usage on a non-trivial

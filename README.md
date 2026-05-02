@@ -69,15 +69,29 @@ validate_comonoid(Tp)                 # true
 | 8 | Cofree comonoid `T_p` (depth-bounded), comodules, bicomodules | 8 |
 | Ext v1 (v0.2) | Lazy `subst`, monoidal ops on `Comonoid`/`Bicomodule`, n-ary `coproduct`, `Coalgebra` peer type, structured `ValidationResult`, `subst_targeted_lens`, symbolic↔concrete interop, lazy `Lens.cod` | 3, 6–8 |
 | Ext v2 (v0.3) | `parallel(::Comonoid, ::Comonoid)` carrier-tensor, `BicomoduleMorphism` 2-cells with horizontal composition, Kan extensions (`kan_along_bicomodule` + `kan_2cat` + `KanExtension` record), `support` / `PolyElement` / `free_variables` (Fairbanks Set-sets), `bicomodule_from_data` + `comonoid_from_data`, `back_directions` / `BackDirectionTable` / `sharp_L` / `sharp_R`, `LazyCofreeComonoid`, `free_category_comonoid`, axiom listings + cofree depth-table docs | 3–8 |
+| Ext v0.3.x (v0.3.1) | Full Niu/Spivak coequalizer for `compose(::Bicomodule, ::Bicomodule)` (closes v1.1 deferral) + `compose_lazy` / `LazyBicomoduleCarrier`, `validate_bicomodule_composition[_detailed]` with `:M` / `:N` / `:cross` failure attribution, right-Kan extensions (`Π_D` for identity-D and finite non-identity), `free_labeled_transition_comonoid` (deprecates `free_category_comonoid`), `behavior_tree_from_paths`, `parallel(::Comonoid; validate=false)` opt-out, n-ary `parallel` for Comonoid | 8 |
 
 Plus a parallel symbolic layer (`SymbolicPolynomial`, `SymbolicLens`, ~25 rewrite rules with trace mode), a `@poly` macro, and a LaTeX renderer. Chapter 5 (adjoint quadruple, factorization systems, base change, cartesian closure) is not implemented — it's structural rather than modeling-oriented.
 
-## What's new in v0.3 (Extensions v2)
+## What's new in v0.3.1 (Concrete Poly v0.3.x asks)
 
-The v0.3 release closes the categorical gaps surfaced by downstream PolyCDS work. Highlights:
+Driven by external feedback from PolyCDS / SOAP-style modeling work. Closes the v1.1-deferred bicomodule-composition coequalizer and ships right-Kan + authoring/validation conveniences:
+
+- **Full Niu/Spivak coequalizer for `compose(::Bicomodule, ::Bicomodule)`.** Carriers are now correct in the general case — positions are coequalizer-balanced pairs `(x, σ)` where `σ : X[x] → Y.positions` matches D-routing, rather than the over-counted `(x, y)` of v0.3.0. `compose_lazy` defers enumeration via `LazyBicomoduleCarrier`. **Required for `master_D = Assessment ⊙ Plan`.**
+- **`validate_bicomodule_composition[_detailed](M, N)`** — pre-flight with attributed failures. `location[1] ∈ {:M, :N, :cross}` tells you which operand to fix.
+- **Right-Kan extensions** — `kan_along_bicomodule(D, M; direction=:right)` and `kan_2cat(D, F; direction=:right)` ship for identity-D and finite non-identity. `Π_D` unicode alias works on the same surface. **Required for the SOAP audit arm `Π_Plan ∘ Π_Assessment`.**
+- **`free_labeled_transition_comonoid(positions, edges; max_path_length)`** — canonical builder for `D` and `P_d` in PolyCDS-style modeling. Edges in `(src, label, tgt)` shape. Supersedes v0.3.0's `free_category_comonoid` (now deprecated with `Base.depwarn`; removed in v0.4).
+- **Authoring conveniences** — `behavior_tree_from_paths(label, dict)` for cofree authoring; `parallel(c, d; validate=false)` opt-out; n-ary `parallel(c1, c2, c3, ...)` for Comonoid.
+- **Docstring polish** — `bicomodule_from_data` now documents the coverage requirement on `right_back_directions` (and `left_back_directions`) explicitly.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full migration notes.
+
+## What was new in v0.3 (Extensions v2)
+
+The v0.3.0 release closed the categorical gaps surfaced by downstream PolyCDS work. Highlights:
 
 - **`BicomoduleMorphism`** — first-class 2-cells in Cat#. Vertical and horizontal composition, whiskering, structural validation matching `validate_bicomodule_detailed`'s failure shape.
-- **Kan extensions** — `kan_along_bicomodule` (finite, comodule-along-bicomodule) and `kan_2cat` (symbolic-aware, 2-categorical Kan), both returning a `KanExtension` record with `factor_through` for the universal property. Identity-D case ships in v0.3; non-identity in v0.3.x. See [`docs/dev/kan_extensions_construction.md`](docs/dev/kan_extensions_construction.md).
+- **Kan extensions** — `kan_along_bicomodule` (finite, comodule-along-bicomodule) and `kan_2cat` (symbolic-aware, 2-categorical Kan), both returning a `KanExtension` record with `factor_through` for the universal property. Identity-D case ships in v0.3.0; non-identity (finite) and right-Kan in v0.3.1. See [`docs/dev/kan_extensions_construction.md`](docs/dev/kan_extensions_construction.md).
 - **`support` operator** — Fairbanks-style support of `PolyElement(p, position, assignment)` for the concrete case; `free_variables` on `SymExpr` for the symbolic side.
 - **Authoring helpers** — `bicomodule_from_data` / `comonoid_from_data` build the underlying lenses from authored Dicts. Validates by default; `validate=false` for intermediate constructions. Walkthrough at [`docs/src/tours/08_bicomodule_walkthrough.md`](docs/src/tours/08_bicomodule_walkthrough.md).
 - **`LazyCofreeComonoid`** — defers the tower-of-exponentials `behavior_trees` enumeration. Cached materialization, `tree_at` for single-tree access, lazy `validate_comonoid` via Niu/Spivak Thm 8.45.
@@ -92,4 +106,4 @@ The library has two layers that interoperate:
 
 **Concrete layer.** `Polynomial`, `Lens`, etc. — actual data, finite enumeration. Use this when you have explicit position-sets and direction-sets and want to compute. Operations like `subst(p, q)` eagerly enumerate.
 
-**Symbolic layer.** `SymbolicPolynomial`, `SymbolicLens` — variable-driven expression trees with `simplify` and a rewrite-rule engine. Use this when you're working up to isomorphism, want to verify book identities like `(a + b) ⊗ c ≈ (a ⊗ c) + (b ⊗ c)`, or y
+**Symbolic layer.** `SymbolicPolynomial`, `SymbolicLens` — variable-driven expression trees with `simplify` and a rewrite-rule engine. Use this when you're working up to isomorphism, want to verify book identities like `(a + b) ⊗ c ≈ (a ⊗ c) + (b ⊗ c)`, or you have non-finite carriers that can't be enumerated.

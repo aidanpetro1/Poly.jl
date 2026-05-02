@@ -123,7 +123,9 @@ export
     state_system_comonoid, discrete_comonoid, monoid_comonoid,
     identity_retrofunctor,
     # Free category on a graph (Extensions v2, PR #14).
-    free_category_comonoid,
+    # `free_category_comonoid` deprecated in v0.3.1 (depwarn forwarder
+    # to `free_labeled_transition_comonoid`); removed in v0.4.
+    free_category_comonoid, free_labeled_transition_comonoid,
     # Authoring helper (Extensions v2 PR #5).
     comonoid_from_data,
 
@@ -138,6 +140,8 @@ export
 
     # Cofree comonoid + comodules + bicomodules (Sprint 8)
     BehaviorTree, behavior_trees, tree_paths, tree_walk,
+    # Path-dict builder for BehaviorTree (v0.3.x).
+    behavior_tree_from_paths,
     cofree_comonoid, cofree_unit, cofree_universal,
     RightComodule, regular_right_comodule,
     validate_right_comodule, validate_right_comodule_detailed,
@@ -145,6 +149,13 @@ export
     validate_left_comodule, validate_left_comodule_detailed,
     Bicomodule, regular_bicomodule,
     validate_bicomodule, validate_bicomodule_detailed,
+    # Composition pre-flight (v0.3.x). Use before `compose(M, N)` when
+    # you want attributed failure information (M-side / N-side / cross).
+    validate_bicomodule_composition, validate_bicomodule_composition_detailed,
+    # Lazy bicomodule composite carrier (v0.3.x — full Niu/Spivak
+    # coequalizer, eager+lazy paths). `compose_lazy` is the lazy variant
+    # of `compose`; `LazyBicomoduleCarrier` is the underlying polynomial.
+    compose_lazy, LazyBicomoduleCarrier,
     # Authoring helper (Extensions v2 PR #5).
     bicomodule_from_data,
     # Bicomodule-specific back-direction shorthands (Extensions v2 PR #6).
@@ -185,6 +196,7 @@ export
     # Symbolic-side support: free-variable extraction (Extensions v2 PR #4).
     free_variables,
     to_latex, latex_display
+
 
 include("Cardinality.jl")
 include("PolySets.jl")
