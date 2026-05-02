@@ -19,6 +19,50 @@ cardinality(p.positions)          # Finite(4)
 cardinality(p(FinPolySet([:a]))) # |p({:a})| = 4
 ```
 
+## Building polynomials with `@poly`
+
+The `@poly` macro lets you write polynomials in their standard mathematical
+notation. Positions get anonymous integer labels; direction-sets become
+`FinPolySet(1:k)`. Use the explicit `Polynomial(positions, dir_at_fn)`
+constructor when you need meaningful labels.
+
+```julia
+@poly y                  # the identity polynomial
+@poly y^3                # representable y^3 (one position, 3 directions)
+@poly 2y                 # linear with 2 positions, each with 1 direction
+@poly 0                  # the zero polynomial
+@poly 1                  # the constant polynomial 1 (= y^0)
+
+# Composite expressions:
+@poly y^3 + 2y + 1       # mixed; 4 positions
+@poly 2y^3               # 2 copies of y^3
+
+# Tensor (Dirichlet / parallel product):
+@poly y^2 ⊗ y^3          # = parallel(y^2, y^3) ≈ y^6
+
+# Substitution (composition product):
+@poly y^3 ▷ y^2          # = subst(y^3, y^2) ≈ y^6
+@poly (y + 1) ▷ y^2      # left distributivity etc.
+
+# Variables in scope on the right pass through unchanged:
+q = @poly y + 1
+@poly y^2 ▷ q            # composes with the bound `q`
+```
+
+`@poly`-built polynomials use integer labels, while the canonical
+constants `y`, `zero_poly`, and `one_poly` use `Symbol` labels. They are
+isomorphic but not `==`. Compare across forms with `≈` (alias for
+`is_iso`):
+
+```julia
+@poly y    ≈ y           # true (cardinality-iso)
+@poly y    == y          # false (different label types)
+```
+
+For unary minus or any operator the macro doesn't recognize, the macro
+errors out — `@poly` is intentionally narrow. Reach for the explicit
+`Polynomial(positions, dir_at_fn)` constructor when you outgrow it.
+
 ## Hello, lens
 
 ```julia

@@ -236,3 +236,118 @@ function show(io::IO, f::Lens)
 end
 
 show(io::IO, ::MIME"text/plain", f::Lens) = print(io, polybox(f))
+
+# ============================================================
+# back_directions accessor (Extensions v2 PR #6)
+# ============================================================
+#
+# `Lens.on_directions` is a `DependentFunction` that, for each domain
+# position `i`, returns a `PolyFunction` mapping codomain directions to
+# domain directions (the lens "back-direction" map `f♯_i`). The raw form
+# is callable but opaque — you can call it but can't easily enumerate or
+# pretty-print it. `back_directions` materializes the map into a
+# `BackDirectionTable` (when finite-and-small) for inspection / debugging.
+
+"""
+    BackDirectionTable
+
+Materialized view of a `Lens`'s back-direction map: a `Dict`-like wrapper
+keyed by `(domain_position, codomain_direction)` with values
+`domain_direction`. Returned by [`back_directions`](@ref) when the
+underlying data is finite and within `TABULATE_SIZE_CAP`.
+"""
+struct BackDirectionTable
+    entries::Dict{Tuple,Any}
+end
+
+Base.getindex(t::BackDirectionTable, key::Tuple) = t.entries[key]
+Base.getindex(t::BackDirectionTable, pos, codir) = t.entries[(pos, codir)]
+Base.length(t::BackDirectionTable) = length(t.entries)
+Base.iterate(t::BackDirectionTable, state...) = iterate(t.entries, state...)
+Base.pairs(t::BackDirectionTable) = pairs(t.entries)
+Base.haskey(t::BackDirectionTable, key) = haskey(t.entries, key)
+Base.keys(t::BackDirectionTable) = keys(t.entries)
+Base.values(t::BackDirectionTable) = values(t.entries)
+Base.:(==)(a::BackDirectionTable, b::BackDirectionTable) = a.entries == b.entries
+
+function show(io::IO, t::BackDirectionTable)
+    print(io, "BackDirectionTable(", length(t.entries), " entries)")
+end
+
+function show(io::IO, ::MIME"text/plain", t::BackDirectionTable)
+    println(io, "BackDirectionTable (", length(t.entries), " entries):")
+    by_pos = Dict()
+    for ((p, c), d) in t.entries
+        get!(() -> Dict(), by_pos, p)[c] = d
+    end
+    sorted_pos = try
+        sort!(collect(keys(by_pos)))
+    catch
+        sort!(collect(keys(by_pos)); by=repr)
+    end
+    for p in sorted_pos
+        println(io, "  ", repr(p), ":")
+        sub = by_pos[p]
+        sorted_codir = try
+            sort!(collect(keys(sub)))
+        catch
+            sort!(collect(keys(sub)); by=repr)
+        end
+        for c in sorted_codir
+            println(io, "    ", repr(c), "  ↦  ", repr(sub[c]))
+        end
+    end
+end
+
+"""
+    back_directions(L::Lens; materialize=:auto) -> Union{BackDirectionTable, Function}
+
+Expose the back-direction map of a `Lens`. `materialize` modes: `:auto`
+(default, cap-aware), `true` (force, error if over cap), `false`
+(callable). When a callable is returned, it has signature
+`(pos, codir) -> domdir`.
+"""
+function back_directions(L::Lens; materialize::Union{Bool,Symbol}=:auto)
+    materialize isa Symbol && materialize !== :auto &&
+        throw(ArgumentError("back_directions: `materialize` must be :auto, true, or false; got :$materialize"))
+
+    callable = (pos, codir) -> L.on_directions.f(pos).f(codir)
+
+    materialize === false && return callable
+
+    dom_pos = L.dom.positions
+    if !(dom_pos isa FinPolySet)
+        materialize === true &&
+            throw(ArgumentError("back_directions: cannot materialize a Lens whose domain positions are non-finite (got $(typeof(dom_pos)))"))
+        return callable
+    end
+
+    total = 0
+    for i in dom_pos.elements
+        codir = direction_at(L.cod, L.on_positions.f(i))
+        if !(codir isa FinPolySet)
+            materialize === true &&
+                throw(ArgumentError("back_directions: cod direction-set at position $(repr(L.on_positions.f(i))) is non-finite (got $(typeof(codir)))"))
+            return callable
+        end
+        total += length(codir.elements)
+    end
+
+    if total > TABULATE_SIZE_CAP[]
+        materialize === true &&
+            error("""back_directions: would materialize $total entries (> TABULATE_SIZE_CAP[] = $(TABULATE_SIZE_CAP[])).
+                    Options:
+                      1. Pass `materialize=false` to get the (pos, codir) -> domdir callable.
+                      2. Raise the global cap: `Poly.set_tabulate_cap!($total + 1)`.""")
+        return callable
+    end
+
+    entries = Dict{Tuple,Any}()
+    for i in dom_pos.elements
+        codir = direction_at(L.cod, L.on_positions.f(i))::FinPolySet
+        for b in codir.elements
+            entries[(i, b)] = L.on_directions.f(i).f(b)
+        end
+    end
+    BackDirectionTable(entries)
+end

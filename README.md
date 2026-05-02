@@ -67,8 +67,24 @@ validate_comonoid(Tp)                 # true
 | 6 | Dynamical systems `Sy^S → p`, Moore machines, trajectories | 4 |
 | 7 | Comonoids = small categories (Cat#), retrofunctors | 7 |
 | 8 | Cofree comonoid `T_p` (depth-bounded), comodules, bicomodules | 8 |
+| Ext v1 (v0.2) | Lazy `subst`, monoidal ops on `Comonoid`/`Bicomodule`, n-ary `coproduct`, `Coalgebra` peer type, structured `ValidationResult`, `subst_targeted_lens`, symbolic↔concrete interop, lazy `Lens.cod` | 3, 6–8 |
+| Ext v2 (v0.3) | `parallel(::Comonoid, ::Comonoid)` carrier-tensor, `BicomoduleMorphism` 2-cells with horizontal composition, Kan extensions (`kan_along_bicomodule` + `kan_2cat` + `KanExtension` record), `support` / `PolyElement` / `free_variables` (Fairbanks Set-sets), `bicomodule_from_data` + `comonoid_from_data`, `back_directions` / `BackDirectionTable` / `sharp_L` / `sharp_R`, `LazyCofreeComonoid`, `free_category_comonoid`, axiom listings + cofree depth-table docs | 3–8 |
 
 Plus a parallel symbolic layer (`SymbolicPolynomial`, `SymbolicLens`, ~25 rewrite rules with trace mode), a `@poly` macro, and a LaTeX renderer. Chapter 5 (adjoint quadruple, factorization systems, base change, cartesian closure) is not implemented — it's structural rather than modeling-oriented.
+
+## What's new in v0.3 (Extensions v2)
+
+The v0.3 release closes the categorical gaps surfaced by downstream PolyCDS work. Highlights:
+
+- **`BicomoduleMorphism`** — first-class 2-cells in Cat#. Vertical and horizontal composition, whiskering, structural validation matching `validate_bicomodule_detailed`'s failure shape.
+- **Kan extensions** — `kan_along_bicomodule` (finite, comodule-along-bicomodule) and `kan_2cat` (symbolic-aware, 2-categorical Kan), both returning a `KanExtension` record with `factor_through` for the universal property. Identity-D case ships in v0.3; non-identity in v0.3.x. See [`docs/dev/kan_extensions_construction.md`](docs/dev/kan_extensions_construction.md).
+- **`support` operator** — Fairbanks-style support of `PolyElement(p, position, assignment)` for the concrete case; `free_variables` on `SymExpr` for the symbolic side.
+- **Authoring helpers** — `bicomodule_from_data` / `comonoid_from_data` build the underlying lenses from authored Dicts. Validates by default; `validate=false` for intermediate constructions. Walkthrough at [`docs/src/tours/08_bicomodule_walkthrough.md`](docs/src/tours/08_bicomodule_walkthrough.md).
+- **`LazyCofreeComonoid`** — defers the tower-of-exponentials `behavior_trees` enumeration. Cached materialization, `tree_at` for single-tree access, lazy `validate_comonoid` via Niu/Spivak Thm 8.45.
+- **Inspection** — `back_directions(L::Lens)` returns a `BackDirectionTable` (or callable above `TABULATE_SIZE_CAP`). `sharp_L` / `sharp_R` shorthands for bicomodules; pretty `show` per position groups for fast eyeballing.
+- **Soft API break** — `⊗(::Comonoid, ::Comonoid)` is now the carrier-tensor (matching `Polynomial ⊗`); v0.2 callers expecting categorical product should switch to `*`. See [`docs/dev/extensions_v2_design.md`](docs/dev/extensions_v2_design.md) §1.
+
+The full design doc with all 28 resolved questions and the implementation phasing is at [`docs/dev/extensions_v2_design.md`](docs/dev/extensions_v2_design.md).
 
 ## Two flavors
 
@@ -76,62 +92,4 @@ The library has two layers that interoperate:
 
 **Concrete layer.** `Polynomial`, `Lens`, etc. — actual data, finite enumeration. Use this when you have explicit position-sets and direction-sets and want to compute. Operations like `subst(p, q)` eagerly enumerate.
 
-**Symbolic layer.** `SymbolicPolynomial`, `SymbolicLens` — variable-driven expression trees with `simplify` and a rewrite-rule engine. Use this when you're working up to isomorphism, want to verify book identities like `(a + b) ⊗ c ≈ (a ⊗ c) + (b ⊗ c)`, or your sets are infinite/symbolic. `lift` and `evaluate(env)` bridge the two layers.
-
-The two flavors share notation: `+`, `*` (alias `×`), `⊗`/`parallel`, and `▷`/`subst` work on both `Polynomial` and `SymbolicPolynomial` via Julia dispatch.
-
-## Equality conventions
-
-`==` is **strict structural** equality — same position-set elements, same direction-sets per position. So `p × q != q × p` because the position-tuples come out in a different order.
-
-`≈` (alias for `is_iso`) is **cardinality-iso** — same shape up to relabeling. So `p × q ≈ q × p` and most book identities are stated with `≈`.
-
-`is_iso_strict(p, q)` is in between: a structural bijection that respects direction-sets exactly (distinguishes `Ny` from `Ry`).
-
-For symbolic expressions, `sym_equal(a, b)` simplifies both sides and compares.
-
-## Composition product: `◁` vs `▷`
-
-The book writes `◁` (U+25C1) for the substitution / composition product. Julia's parser does not accept that character as an infix operator, so we use `▷` (U+25B7) at multiplication precedence:
-
-```julia
-p ▷ q              # = subst(p, q),   read "p ◁ q"
-subst_n(p, n)      # = p ◁ⁿ
-```
-
-Display strings, comments, and book references all still say `◁`. The discrepancy is a Julia-parser limitation, not a design choice.
-
-## Comonoids in `(Poly, y, ▷)`
-
-A comonoid in `(Poly, y, ▷)` is exactly a small category (Ahman–Uustalu). Three built-ins:
-
-- `state_system_comonoid(S)` — the contractible groupoid on `S`.
-- `discrete_comonoid(S)` — the discrete category with only identity morphisms.
-- `monoid_comonoid(M, e, op)` — the one-object category `BM`.
-
-`validate_comonoid(c)` checks the laws via the category translation by default. Pass `mode=:lens` to inspect the four book laws on the raw lens data instead — useful when debugging a hand-constructed comonoid.
-
-## Documentation
-
-- [Stable docs](https://aidanpetro1.github.io/Poly.jl/stable/) — full API reference plus three guided tours (polynomials and lenses, dynamical systems, comonoids = categories).
-- [`docs/literate/`](docs/literate/) — the tour sources as runnable `.jl` files, processed by Literate.jl.
-
-## Tests and demos
-
-`test/runtests.jl` runs ~380 tests across all sprints:
-
-```sh
-julia --project=. -e 'using Pkg; Pkg.test()'
-```
-
-`examples/run_all_demos.jl` runs the `_sprintN_demo()` functions in sequence — they double as living examples.
-
-## References
-
-Niu, N. and Spivak, D. I. *Polynomial Functors: A Mathematical Theory of Interaction*. 2024. <https://github.com/ToposInstitute/poly>
-
-Ahman, D. and Uustalu, T. *Directed Containers as Categories*. 2016. (The categorical correspondence used in Sprint 7.)
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+**Symbolic layer.** `SymbolicPolynomial`, `SymbolicLens` — variable-driven expression trees with `simplify` and a rewrite-rule engine. Use this when you're working up to isomorphism, want to verify book identities like `(a + b) ⊗ c ≈ (a ⊗ c) + (b ⊗ c)`, or y

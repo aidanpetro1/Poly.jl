@@ -1267,4 +1267,17 @@ using .Poly
     include("test_extensions_interop.jl")
     include("test_extensions_lazy_lens_cod.jl")
 
+    # ============================================================
+    # Extensions v2 (post-v0.2.0): see docs/dev/extensions_v2_design.md
+    # ============================================================
+    include("test_extensions_v2_representable.jl")
+    include("test_extensions_v2_free_category.jl")
+    include("test_extensions_v2_parallel_comonoid.jl")
+    include("test_extensions_v2_back_directions.jl")
+    include("test_extensions_v2_from_data.jl")
+    include("test_extensions_v2_bicomodule_morphism.jl")
+    include("test_extensions_v2_kan.jl")
+    include("test_extensions_v2_support.jl")
+    include("test_extensions_v2_lazy_cofree.jl")
+
 end  # outer @testset "Poly.jl"

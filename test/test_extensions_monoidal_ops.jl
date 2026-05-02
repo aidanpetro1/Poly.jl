@@ -39,13 +39,21 @@
         @test length(cat.objects.elements) == 4
     end
 
-    @testset "Comonoid ⊗ delegates to *" begin
+    @testset "Comonoid ⊗ is the carrier-tensor (v0.3 semantics)" begin
+        # NOTE: in v0.2, `c ⊗ d` delegated to `c * d` (categorical
+        # product). The Extensions v2 PR #1 work in v0.3 made `⊗` an
+        # alias for `parallel(::Comonoid, ::Comonoid)` (carrier-tensor)
+        # because `⊗` and `parallel` are inseparable as functions via
+        # `const var"⊗" = parallel`. The two are iso as comonoids but
+        # use different direction-set encodings.
         c = state_system_comonoid(FinPolySet([:a, :b]))
         d = state_system_comonoid(FinPolySet([:x, :y]))
         @test (c ⊗ d) isa Comonoid
         @test validate_comonoid(c ⊗ d)
-        # Equal as comonoids (same construction internally).
-        @test (c ⊗ d).carrier == (c * d).carrier
+        # `c ⊗ d` ≈ `c * d` (same comonoid up to iso), but no longer
+        # structurally equal in encoding — the v0.3 carrier-tensor uses
+        # direction-pair encoding while `*` uses morphism-pair encoding.
+        @test (c ⊗ d).carrier ≈ (c * d).carrier
     end
 
     @testset "Comonoid + commutativity (up to iso)" begin

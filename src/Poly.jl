@@ -57,10 +57,14 @@ export
     constant, linear, monomial, representable,
     is_constant, is_linear, is_monomial, is_representable,
     is_iso, is_iso_strict,
+    # Element handle + support (Extensions v2 PR #4).
+    PolyElement, support,
     apply, cardinality_of_apply, corolla_forest,
 
     # Lens
     Lens, identity_lens, compose, lens_count, polybox,
+    # Lens back-direction inspection (Extensions v2 PR #6).
+    BackDirectionTable, back_directions,
 
     # Monoidal products (Sprint 3)
     var"×", var"⊗",
@@ -118,6 +122,10 @@ export
     validate_retrofunctor,
     state_system_comonoid, discrete_comonoid, monoid_comonoid,
     identity_retrofunctor,
+    # Free category on a graph (Extensions v2, PR #14).
+    free_category_comonoid,
+    # Authoring helper (Extensions v2 PR #5).
+    comonoid_from_data,
 
     # Validation results (Extensions v1, PR #6). Public `validate_*` return
     # `Bool` for back-compat with `@test` and existing call sites. Each has
@@ -137,6 +145,20 @@ export
     validate_left_comodule, validate_left_comodule_detailed,
     Bicomodule, regular_bicomodule,
     validate_bicomodule, validate_bicomodule_detailed,
+    # Authoring helper (Extensions v2 PR #5).
+    bicomodule_from_data,
+    # Bicomodule-specific back-direction shorthands (Extensions v2 PR #6).
+    sharp_L, sharp_R,
+    # Bicomodule 2-cells (Extensions v2 PR #2).
+    BicomoduleMorphism, identity_bicomodule_morphism,
+    validate_bicomodule_morphism, validate_bicomodule_morphism_detailed,
+    whisker_left, whisker_right, horizontal_compose,
+    # Kan extensions of bicomodules (Extensions v2 PR #3).
+    KanExtension, kan_along_bicomodule, kan_2cat, factor_through,
+    var"Σ_D", var"Π_D",
+    # Lazy cofree comonoid (Extensions v2 PR #8).
+    LazyCofreeComonoid, cofree_lazy, clear_cache!, tree_at, is_materialized,
+    eraser, duplicator,
 
     # Bicomodule composition (Extensions v1, PR #2). The Unicode `⊙`
     # alias gives book-style infix; `compose` is the named form. The
@@ -160,6 +182,8 @@ export
     # `lift` / `evaluate`, names spelled out for boundary-crossing calls.
     to_symbolic, to_concrete,
     Rule, rules,
+    # Symbolic-side support: free-variable extraction (Extensions v2 PR #4).
+    free_variables,
     to_latex, latex_display
 
 include("Cardinality.jl")

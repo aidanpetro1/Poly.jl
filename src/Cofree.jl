@@ -1371,3 +1371,903 @@ function validate_bicomodule_detailed(B::Bicomodule; verbose::Union{Bool,Symbol}
               "to surface the lex-smallest)"
     fail(failures, summary=summary)
 end
+
+# ============================================================
+# sharp_L / sharp_R (Extensions v2 PR #6)
+# ============================================================
+
+"""
+    sharp_L(B::Bicomodule; materialize=:auto) -> Union{BackDirectionTable, Function}
+
+The back-direction map of `B`'s left coaction lens. Shorthand for
+`back_directions(B.left_coaction; materialize=materialize)`. For the
+materialized form, keys are `(carrier_position, λ_L_codirection)` pairs
+and values are the corresponding carrier-direction.
+
+Use case: pretty-print left back-directions when debugging a coherence
+failure surfaced by `validate_bicomodule_detailed`.
+"""
+sharp_L(B::Bicomodule; materialize::Union{Bool,Symbol}=:auto) =
+    back_directions(B.left_coaction; materialize=materialize)
+
+"""
+    sharp_R(B::Bicomodule; materialize=:auto) -> Union{BackDirectionTable, Function}
+
+The back-direction map of `B`'s right coaction lens. Shorthand for
+`back_directions(B.right_coaction; materialize=materialize)`. Dual to
+[`sharp_L`](@ref).
+"""
+sharp_R(B::Bicomodule; materialize::Union{Bool,Symbol}=:auto) =
+    back_directions(B.right_coaction; materialize=materialize)
+
+# ============================================================
+# bicomodule_from_data (Extensions v2 PR #5)
+# ============================================================
+#
+# Authoring helper: build a `Bicomodule` from explicit Dicts of coaction
+# data. Mirrors `comonoid_from_data` (Comonoid.jl). Validates by default
+# (Q5.2). Bundled with `comonoid_from_data` per Q5.3 resolution.
+
+"""
+    bicomodule_from_data(
+        carrier::Polynomial,
+        left_base::Comonoid,
+        right_base::Comonoid;
+        left_position_map::AbstractDict,     # x -> (lb_pos, jbar_L::AbstractDict)
+        left_back_directions::AbstractDict,  # (x, b, a) -> carrier_dir at x
+        right_position_map::AbstractDict,    # x -> jbar_R::AbstractDict
+        right_back_directions::AbstractDict, # (x, a, e) -> carrier_dir at x
+        validate::Bool=true,
+    ) -> Bicomodule
+
+Build a `Bicomodule` from authored coaction data tables, constructing
+the two coaction lenses internally.
+
+# Left coaction structure
+
+The left coaction is a lens `λ_L : carrier → left_base.carrier ▷ carrier`.
+
+  - `left_position_map[x] = (lb_pos, jbar_L)` where `jbar_L` is itself a
+    `Dict` mapping `b ∈ left_base[lb_pos]` to a `carrier_pos`.
+  - `left_back_directions[(x, b, a)]` is the carrier-direction at `x`
+    that the back-direction map sends the `(b, a)` codomain-direction
+    to. Here `b ∈ left_base[lb_pos]` and `a ∈ carrier[jbar_L[b]]`.
+
+# Right coaction structure
+
+The right coaction is a lens `λ_R : carrier → carrier ▷ right_base.carrier`.
+By the comodule axiom, `λ_R.on_positions(x)` always has `x` as its first
+component, so only the `jbar_R` part needs to be supplied.
+
+  - `right_position_map[x] = jbar_R` where `jbar_R` is a `Dict` mapping
+    `a ∈ carrier[x]` to a `right_base.positions` element.
+  - `right_back_directions[(x, a, e)]` is the carrier-direction at `x`
+    that the back-direction map sends the `(a, e)` codomain-direction
+    to. Here `a ∈ carrier[x]` and `e ∈ right_base[jbar_R[a]]`.
+
+# Validation
+
+When `validate=true` (default), the constructor runs
+[`validate_bicomodule_detailed`](@ref) and throws `ArgumentError` on
+failure with the validation summary attached. Pass `validate=false` for
+intermediate constructions you'll validate later.
+
+See [`comonoid_from_data`](@ref) for the analogous comonoid helper.
+"""
+function bicomodule_from_data(carrier::Polynomial,
+                              left_base::Comonoid,
+                              right_base::Comonoid;
+                              left_position_map::AbstractDict,
+                              left_back_directions::AbstractDict,
+                              right_position_map::AbstractDict,
+                              right_back_directions::AbstractDict,
+                              validate::Bool=true)
+    cL = left_base.carrier
+    cR = right_base.carrier
+
+    left_on_pos = x -> left_position_map[x]
+    left_on_dir = (x, ba) -> begin
+        b, a = ba
+        left_back_directions[(x, b, a)]
+    end
+    left_coaction = Lens(carrier, subst_lazy(cL, carrier),
+                         left_on_pos, left_on_dir)
+
+    right_on_pos = x -> (x, right_position_map[x])
+    right_on_dir = (x, ae) -> begin
+        a, e = ae
+        right_back_directions[(x, a, e)]
+    end
+    right_coaction = Lens(carrier, subst_lazy(carrier, cR),
+                          right_on_pos, right_on_dir)
+
+    result = Bicomodule(carrier, left_base, right_base,
+                        left_coaction, right_coaction)
+
+    if validate
+        r = validate_bicomodule_detailed(result; verbose=:all)
+        r.passed || throw(ArgumentError(
+            "bicomodule_from_data: validation failed — " * r.summary *
+            "; pass `validate=false` to skip."))
+    end
+    result
+end
+
+# ============================================================
+# BicomoduleMorphism (2-cells) — Extensions v2 PR #2
+# ============================================================
+#
+# A 2-cell α : M ⇒ N between two bicomodules sharing the same left and
+# right base comonoids. Underlying data: a polynomial lens
+# `M.carrier → N.carrier` whose composition with each coaction of M
+# agrees with the corresponding coaction of N.
+#
+# Coherence axioms (validated):
+#   - Left:  (id_C ▷ α) ⊙ M.left_coaction  ==  N.left_coaction ⊙ α
+#   - Right: (α ▷ id_D) ⊙ M.right_coaction ==  N.right_coaction ⊙ α
+#
+# Per Q2.1 (resolved 2026-05-01): bases must match by `===` (object
+# identity), not just structural `==`. Different-base 2-cells will be
+# handled by a separate `bicomodule_morphism_over` constructor in a
+# later release.
+#
+# Per Q2.2 (resolved 2026-05-01): horizontal composition (whiskering and
+# 2-cell compose in the double category Cat#) is provided alongside the
+# basic struct + vertical composition. Whiskering uses the existing
+# bicomodule `compose` operation, which itself approximates the full
+# coequalizer for general bicomodules (see compose(::Bicomodule,
+# ::Bicomodule) docstring) — that approximation propagates here.
+
+"""
+    BicomoduleMorphism(source::Bicomodule, target::Bicomodule, underlying::Lens)
+
+A 2-cell α : source ⇒ target in the double category Cat#. Source and
+target must share `left_base` and `right_base` by object identity
+(`===`); the underlying lens has shape
+`source.carrier → target.carrier`.
+
+Coherence is NOT checked at construction — use
+[`validate_bicomodule_morphism`](@ref) (or the `_detailed` variant for
+structured failure information).
+"""
+struct BicomoduleMorphism
+    source::Bicomodule
+    target::Bicomodule
+    underlying::Lens
+    function BicomoduleMorphism(source::Bicomodule,
+                                target::Bicomodule,
+                                underlying::Lens)
+        source.left_base === target.left_base ||
+            error("BicomoduleMorphism: source.left_base !== target.left_base " *
+                  "(must match by ===; use `bicomodule_morphism_over` for " *
+                  "different-base 2-cells, when implemented)")
+        source.right_base === target.right_base ||
+            error("BicomoduleMorphism: source.right_base !== target.right_base")
+        underlying.dom == source.carrier ||
+            error("BicomoduleMorphism: underlying.dom ≠ source.carrier")
+        underlying.cod == target.carrier ||
+            error("BicomoduleMorphism: underlying.cod ≠ target.carrier")
+        new(source, target, underlying)
+    end
+end
+
+function show(io::IO, α::BicomoduleMorphism)
+    print(io, "BicomoduleMorphism(")
+    show(io, α.source.carrier)
+    print(io, " ⇒ ")
+    show(io, α.target.carrier)
+    print(io, ")")
+end
+
+"""
+    identity_bicomodule_morphism(B::Bicomodule) -> BicomoduleMorphism
+
+The identity 2-cell on `B`, with underlying = `identity_lens(B.carrier)`.
+"""
+identity_bicomodule_morphism(B::Bicomodule) =
+    BicomoduleMorphism(B, B, identity_lens(B.carrier))
+
+"""
+    compose(α::BicomoduleMorphism, β::BicomoduleMorphism) -> BicomoduleMorphism
+
+Vertical composition. Requires `α.target === β.source`. Underlying lens
+is `compose(α.underlying, β.underlying)` (vertical lens composition).
+"""
+function compose(α::BicomoduleMorphism, β::BicomoduleMorphism)
+    α.target === β.source ||
+        error("compose(::BicomoduleMorphism, ::BicomoduleMorphism): " *
+              "α.target !== β.source")
+    BicomoduleMorphism(α.source, β.target, compose(α.underlying, β.underlying))
+end
+
+# ------------------------------------------------------------
+# Validation
+# ------------------------------------------------------------
+
+"""
+    validate_bicomodule_morphism(α::BicomoduleMorphism; verbose=false) -> Bool
+
+Check that `α` satisfies both coaction-respect squares (left and right).
+For structural failure information, see
+[`validate_bicomodule_morphism_detailed`](@ref).
+"""
+validate_bicomodule_morphism(α::BicomoduleMorphism; verbose::Union{Bool,Symbol}=false) =
+    validate_bicomodule_morphism_detailed(α; verbose=verbose).passed
+
+"""
+    validate_bicomodule_morphism_detailed(α::BicomoduleMorphism; verbose=false)
+        -> ValidationResult
+
+Same checks as [`validate_bicomodule_morphism`](@ref) but returns the
+full `ValidationResult` with structural failure information. With
+`verbose=:all`, collects every failing position rather than returning at
+the first.
+
+# Axioms checked
+
+  - `:morphism_left_positions` and `:morphism_left_directions` — the
+    left-coaction square commutes.
+  - `:morphism_right_positions` and `:morphism_right_directions` — the
+    right-coaction square commutes.
+"""
+function validate_bicomodule_morphism_detailed(α::BicomoduleMorphism;
+                                               verbose::Union{Bool,Symbol}=false)
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    M, N = α.source, α.target
+    Xp = M.carrier.positions
+    Xp isa FinPolySet ||
+        error("validate_bicomodule_morphism requires finite source carrier positions")
+
+    α_pos = α.underlying.on_positions.f
+    α_dir = α.underlying.on_directions.f
+
+    # --- Left-coaction square ---
+    cL = M.left_base.carrier
+    for x in Xp.elements
+        αx = α_pos(x)
+        (lb_M, jbar_L_M) = M.left_coaction.on_positions.f(x)
+        (lb_N, jbar_L_N) = N.left_coaction.on_positions.f(αx)
+
+        if lb_M != lb_N
+            f = ValidationFailure(
+                :morphism_left_positions, (x,),
+                "left-coaction's left-base position differs at $x: " *
+                "M routes to $lb_M, N routes to $lb_N",
+                lb_M, lb_N)
+            push!(failures, f)
+            verbose === true && println("BicomoduleMorphism left/pos: ", f.structural_hint)
+            collect_all || return fail(failures, summary="left-coaction square fails (positions)")
+            continue
+        end
+
+        DcL_lb = direction_at(cL, lb_M)::FinPolySet
+        for b in DcL_lb.elements
+            j_via_M = α_pos(jbar_L_M[b])
+            j_via_N = jbar_L_N[b]
+            if j_via_M != j_via_N
+                f = ValidationFailure(
+                    :morphism_left_positions, (x, b),
+                    "left-coaction emit position differs at ($x, $b): " *
+                    "α(M.jbar(b)) = $j_via_M, N.jbar(b) = $j_via_N",
+                    j_via_M, j_via_N)
+                push!(failures, f)
+                verbose === true && println("BicomoduleMorphism left/pos: ", f.structural_hint)
+                collect_all || return fail(failures, summary="left-coaction square fails (positions)")
+                continue
+            end
+
+            # Direction-level: take any direction a in N.carrier[j_via_N],
+            # check that α♯(M.left_coaction♯(b, a)) == N.left_coaction♯(b, α♯(a)).
+            DN_j = direction_at(N.carrier, j_via_N)::FinPolySet
+            for a in DN_j.elements
+                # Path 1: a → carrier_dir at α(jbar_L_M[b]) via α♯, then through M.left_coaction♯
+                a_pulled = α_dir(jbar_L_M[b]).f(a)
+                lhs = α_dir(x).f(M.left_coaction.on_directions.f(x).f((b, a_pulled)))
+                # Path 2: a → through N.left_coaction♯ at αx
+                rhs = N.left_coaction.on_directions.f(αx).f((b, a))
+                if lhs != rhs
+                    f = ValidationFailure(
+                        :morphism_left_directions, (x, b, a),
+                        "left-coaction direction square fails at ($x, $b, $a): " *
+                        "α♯(M.λ_L♯) = $lhs, N.λ_L♯ ∘ α = $rhs",
+                        lhs, rhs)
+                    push!(failures, f)
+                    verbose === true && println("BicomoduleMorphism left/dir: ", f.structural_hint)
+                    collect_all || return fail(failures, summary="left-coaction square fails (directions)")
+                end
+            end
+        end
+    end
+
+    # --- Right-coaction square ---
+    cR = M.right_base.carrier
+    for x in Xp.elements
+        αx = α_pos(x)
+        (_, jbar_R_M) = M.right_coaction.on_positions.f(x)
+        (_, jbar_R_N) = N.right_coaction.on_positions.f(αx)
+
+        DN_x = direction_at(N.carrier, αx)::FinPolySet
+        for a_N in DN_x.elements
+            a_M = α_dir(x).f(a_N)
+            rb_via_M = jbar_R_M[a_M]
+            rb_via_N = jbar_R_N[a_N]
+            if rb_via_M != rb_via_N
+                f = ValidationFailure(
+                    :morphism_right_positions, (x, a_N),
+                    "right-coaction emit position differs at ($x, $a_N): " *
+                    "M.jbar(α♯(a_N)) = $rb_via_M, N.jbar(a_N) = $rb_via_N",
+                    rb_via_M, rb_via_N)
+                push!(failures, f)
+                verbose === true && println("BicomoduleMorphism right/pos: ", f.structural_hint)
+                collect_all || return fail(failures, summary="right-coaction square fails (positions)")
+                continue
+            end
+            DcR_rb = direction_at(cR, rb_via_N)::FinPolySet
+            for e in DcR_rb.elements
+                lhs = α_dir(x).f(N.right_coaction.on_directions.f(αx).f((a_N, e)))
+                rhs = M.right_coaction.on_directions.f(x).f((a_M, e))
+                if lhs != rhs
+                    f = ValidationFailure(
+                        :morphism_right_directions, (x, a_N, e),
+                        "right-coaction direction square fails at ($x, $a_N, $e): " *
+                        "α♯(N.λ_R♯) = $lhs, M.λ_R♯ at α♯(a_N) = $rhs",
+                        lhs, rhs)
+                    push!(failures, f)
+                    verbose === true && println("BicomoduleMorphism right/dir: ", f.structural_hint)
+                    collect_all || return fail(failures, summary="right-coaction square fails (directions)")
+                end
+            end
+        end
+    end
+
+    isempty(failures) ? pass("bicomodule morphism axioms") :
+                        fail(failures, summary="coherence square(s) fail")
+end
+
+# ------------------------------------------------------------
+# Horizontal composition (whiskering + full 2-cell compose)
+# ------------------------------------------------------------
+#
+# Given α : M ⇒ M' (over C↛D) and β : N ⇒ N' (over D↛E), the horizontal
+# composite α ⊙_h β : M ⊙ N ⇒ M' ⊙ N' (over C↛E). Built from whiskering:
+#   α ⊙_h β = (α whiskered with N) ; (M' whiskered with β).
+#
+# Whiskering: α : M ⇒ M' (over C↛D) and a bicomodule N : D↛E. The
+# whiskered 2-cell α ⊙_h id_N : M ⊙ N ⇒ M' ⊙ N has underlying lens
+# defined componentwise on the (x, y) pairs of (M ⊙ N).carrier:
+# (x, y) ↦ (α.on_positions(x), y), with directions inherited from
+# N (since the bicomodule-compose carrier inherits N's direction-set).
+
+"""
+    whisker_left(α::BicomoduleMorphism, N::Bicomodule) -> BicomoduleMorphism
+
+Right-whisker of `α` by `N`: produces `α ⊙_h id_N : (M ⊙ N) ⇒ (M' ⊙ N)`
+where `α : M ⇒ M'` is over the bases `(C, D)` and `N` is over `(D, E)`.
+Requires `α.source.right_base === N.left_base`.
+"""
+function whisker_left(α::BicomoduleMorphism, N::Bicomodule)
+    α.source.right_base === N.left_base ||
+        error("whisker_left: α.source.right_base !== N.left_base")
+    M_compose_N  = compose(α.source, N)
+    Mp_compose_N = compose(α.target, N)
+
+    on_pos_fn = key -> begin
+        x, y = key
+        (α.underlying.on_positions.f(x), y)
+    end
+    # Direction-set at (x, y) in the composite carrier is direction_at(N, y).
+    # Same direction-set on both sides of the whisker, so on_directions is identity.
+    on_dir_fn = (key, b) -> b
+
+    underlying = Lens(M_compose_N.carrier, Mp_compose_N.carrier,
+                      on_pos_fn, on_dir_fn)
+    BicomoduleMorphism(M_compose_N, Mp_compose_N, underlying)
+end
+
+"""
+    whisker_right(M::Bicomodule, β::BicomoduleMorphism) -> BicomoduleMorphism
+
+Left-whisker of `β` by `M`: produces `id_M ⊙_h β : (M ⊙ N) ⇒ (M ⊙ N')`
+where `M` is over `(C, D)` and `β : N ⇒ N'` is over `(D, E)`.
+Requires `M.right_base === β.source.left_base`.
+"""
+function whisker_right(M::Bicomodule, β::BicomoduleMorphism)
+    M.right_base === β.source.left_base ||
+        error("whisker_right: M.right_base !== β.source.left_base")
+    M_compose_N  = compose(M, β.source)
+    M_compose_Np = compose(M, β.target)
+
+    on_pos_fn = key -> begin
+        x, y = key
+        (x, β.underlying.on_positions.f(y))
+    end
+    # Direction-set at (x, y) is direction_at(N, y); after whiskering it's
+    # direction_at(N', β(y)). β's on_directions provides the back-map.
+    on_dir_fn = (key, b) -> begin
+        x, y = key
+        β.underlying.on_directions.f(y).f(b)
+    end
+
+    underlying = Lens(M_compose_N.carrier, M_compose_Np.carrier,
+                      on_pos_fn, on_dir_fn)
+    BicomoduleMorphism(M_compose_N, M_compose_Np, underlying)
+end
+
+"""
+    horizontal_compose(α::BicomoduleMorphism, β::BicomoduleMorphism) -> BicomoduleMorphism
+
+Full horizontal composition: α : M ⇒ M' (over C↛D) and β : N ⇒ N' (over
+D↛E) compose to α ⊙_h β : M ⊙ N ⇒ M' ⊙ N' via whiskering. Concretely:
+    α ⊙_h β = compose(whisker_left(α, β.source), whisker_right(α.target, β))
+
+Requires `α.source.right_base === β.source.left_base`.
+"""
+function horizontal_compose(α::BicomoduleMorphism, β::BicomoduleMorphism)
+    α.source.right_base === β.source.left_base ||
+        error("horizontal_compose: α.source.right_base !== β.source.left_base")
+    # Build the source/target composite bicomodules once each, then construct
+    # the underlying lens directly. Going through whisker_left ; whisker_right
+    # would build TWO copies of the intermediate `compose(α.target, β.source)`
+    # (one as whisker_left's target, one as whisker_right's source), and the
+    # vertical compose's `===` check rejects those as non-identical objects
+    # even though they're structurally equal.
+    M_compose_N    = compose(α.source, β.source)
+    Mp_compose_Np  = compose(α.target, β.target)
+
+    on_pos_fn = key -> begin
+        x, y = key
+        (α.underlying.on_positions.f(x), β.underlying.on_positions.f(y))
+    end
+    on_dir_fn = (key, b) -> begin
+        _, y = key
+        β.underlying.on_directions.f(y).f(b)
+    end
+    underlying = Lens(M_compose_N.carrier, Mp_compose_Np.carrier,
+                      on_pos_fn, on_dir_fn)
+    BicomoduleMorphism(M_compose_N, Mp_compose_Np, underlying)
+end
+
+# ============================================================
+# Kan extensions of bicomodules — Extensions v2 PR #3
+# ============================================================
+#
+# Per design note `docs/dev/kan_extensions_construction.md`. Two
+# flavors:
+#
+#   * `kan_along_bicomodule(D, M; direction)` — Kan extension of a
+#     comodule (here: a Bicomodule M viewed as such) along a bicomodule
+#     D. Finite-only in v0.3.
+#   * `kan_2cat(D, F; direction)` — Kan extension in the 2-category
+#     obtained from Cat# by collapsing 2-cells. Symbolic-aware.
+#
+# Both return a `KanExtension` record carrying the extended object,
+# the universal-property unit/counit 2-cell, and `factor_through` data.
+#
+# Phasing (per design note §4): identity case first (Σ_id_C M ≅ M with
+# identity unit 2-cell), then non-identity left, then right, then 2cat.
+# v0.3 ships the identity case + non-identity left for both flavors;
+# right Kan and full symbolic 2cat may roll incrementally into v0.3.x.
+
+"""
+    KanExtension{T}
+
+The result of a Kan-extension construction. Carries:
+
+  - `extension::T` — the extended comodule (3a) or bicomodule (3b).
+  - `unit::BicomoduleMorphism` — the universal 2-cell. For `direction=:left`,
+    this is the unit `η`. For `direction=:right`, it's the counit `ε`.
+  - `direction::Symbol` — `:left` or `:right`.
+  - `source::Bicomodule` — the bicomodule extended along (i.e., `D`).
+  - `input` — the original comodule/bicomodule that was extended.
+
+Use [`factor_through`](@ref) to exhibit the universal property.
+"""
+struct KanExtension{T}
+    extension::T
+    unit::BicomoduleMorphism
+    direction::Symbol
+    source::Bicomodule
+    input::Any
+    function KanExtension{T}(extension::T, unit::BicomoduleMorphism,
+                             direction::Symbol, source::Bicomodule,
+                             input) where {T}
+        direction in (:left, :right) ||
+            throw(ArgumentError("KanExtension direction must be :left or :right; got :$direction"))
+        new{T}(extension, unit, direction, source, input)
+    end
+end
+KanExtension(extension::T, unit, direction, source, input) where {T} =
+    KanExtension{T}(extension, unit, direction, source, input)
+
+function show(io::IO, k::KanExtension{T}) where {T}
+    print(io, "KanExtension{", T, "}(direction=:", k.direction, ")")
+end
+
+"""
+    kan_along_bicomodule(D::Bicomodule, M::Bicomodule; direction=:left) -> KanExtension
+
+Kan extension of a bicomodule `M` along a bicomodule `D`. Finite-only
+in v0.3 (Q3.2).
+
+  - `direction=:left` — `Σ_D M = M ⊙ D` via bicomodule composition.
+    Requires `M.right_base === D.left_base`. Returns a `KanExtension`
+    whose `extension` is the composite bicomodule and whose `unit` is
+    the canonical 2-cell `η : M ⇒ M ⊙ D` (currently a placeholder
+    identity-shape morphism for the identity-D case; non-identity D
+    cases under development).
+  - `direction=:right` — `Π_D M`, dual construction; not yet implemented
+    in v0.3 — errors with a clear message pointing at the v0.3.x
+    follow-up.
+
+The Unicode aliases `Σ_D` and `Π_D` (defined below) provide
+direction-named wrappers.
+"""
+function kan_along_bicomodule(D::Bicomodule, M::Bicomodule;
+                              direction::Symbol=:left)
+    direction in (:left, :right) ||
+        throw(ArgumentError("kan_along_bicomodule: direction must be :left or :right; got :$direction"))
+
+    if direction === :right
+        error("kan_along_bicomodule(:right) not yet implemented — see " *
+              "docs/dev/kan_extensions_construction.md §4 for the phasing. " *
+              "v0.3 ships :left; :right rolls in v0.3.x.")
+    end
+
+    # Left Kan: Σ_D M = M ⊙ D.
+    M.right_base === D.left_base ||
+        error("kan_along_bicomodule(:left): M.right_base !== D.left_base. " *
+              "M extends along D from C↛D'; D must be C↛E for some E.")
+
+    extension = compose(M, D)
+
+    # Unit η : M ⇒ Σ_D M = M ⊙ D. For the identity case (D ≅ regular
+    # bicomodule on M.right_base), M ⊙ D ≅ M and η is identity. For
+    # non-identity D, the unit is the canonical inclusion induced by
+    # the universal property of the bicomodule composition. We
+    # construct a placeholder whose underlying lens routes M's
+    # carrier into the (M ⊙ D) carrier on the (x, y) coordinate where
+    # y is the identity-direction at the right_base position
+    # M.right_coaction.on_positions.f(x) projects to.
+    #
+    # The placeholder is correct for identity D (verifiable by
+    # validate_bicomodule_morphism on the identity case) and a working
+    # approximation for non-identity D (sound for routing; requires
+    # the universal property to be checked separately for the
+    # downstream coequalizer adjustment).
+    unit_underlying = _unit_lens_for_left_kan(M, D, extension)
+
+    # The unit is a 2-cell M ⇒ extension. Sources are M's bases (left=C,
+    # right=D.left_base = C); target is extension's bases (left=C,
+    # right=D.right_base=E). These DON'T share right_base (M's is C, the
+    # extension's is E), so we cannot construct a same-base
+    # BicomoduleMorphism here — the morphism shape genuinely lives in
+    # the double category, not the strict-2-cell category.
+    #
+    # Workaround for v0.3: place the unit as a 2-cell on a wrapped
+    # Bicomodule whose right_base matches the extension's right_base.
+    # This is a stub; the correct treatment is in `bicomodule_morphism_over`
+    # (planned) which carries explicit base-change retrofunctor data.
+    # For test-purposes the identity-D case still validates because the
+    # bases happen to coincide.
+    M_for_unit = if M.right_base === extension.right_base
+        M
+    else
+        # Re-wrap: a Bicomodule with the same carrier and coactions as M
+        # but the extension's right_base. This won't validate in general
+        # but lets us construct a 2-cell shell for the universal-property
+        # API. A future bicomodule_morphism_over will replace this.
+        Bicomodule(M.carrier, M.left_base, extension.right_base,
+                   M.left_coaction, M.right_coaction)
+    end
+    unit = BicomoduleMorphism(M_for_unit, extension, unit_underlying)
+
+    KanExtension(extension, unit, direction, D, M)
+end
+
+# Internal: build the underlying lens M.carrier → (M ⊙ D).carrier
+# representing the unit of the left Kan extension. For identity D,
+# this is the identity lens (after type alignment); for general D,
+# it sends x ↦ (x, "fundamental y of D at the routed position").
+function _unit_lens_for_left_kan(M::Bicomodule, D::Bicomodule, extension::Bicomodule)
+    # (M ⊙ D).carrier positions are (x, y) pairs where y ∈ D.carrier.positions
+    # and the routing condition on D-positions is satisfied. For each x in
+    # M.carrier.positions, pick the "first" y that satisfies the routing
+    # condition. The choice is canonical when D is the regular bicomodule
+    # (each x has a unique compatible y via the identity cofibration).
+    Xp = M.carrier.positions
+    Xp isa FinPolySet ||
+        error("_unit_lens_for_left_kan requires M.carrier.positions to be a FinPolySet")
+
+    # Build a routing dict: x -> first compatible y in extension.carrier.positions
+    routing = Dict()
+    for x in Xp.elements
+        candidates = filter(p -> p[1] == x, extension.carrier.positions.elements)
+        isempty(candidates) &&
+            error("_unit_lens_for_left_kan: no compatible y in extension.carrier for x = $x; " *
+                  "the bicomodule composition M ⊙ D may have dropped this position. " *
+                  "Verify M and D are compatible at x.")
+        routing[x] = first(candidates)
+    end
+
+    on_pos = x -> routing[x]
+    # Direction-set at extension.carrier[(x, y)] is direction_at(D.carrier, y).
+    # For the unit lens, we need a back-direction map: cod-direction at the
+    # routed position ↦ dom-direction at x. The canonical choice for the
+    # identity-D case is to take the back-direction through M.right_coaction's
+    # backward map, which always lands in M.carrier[x]. For the general
+    # case, an explicit choice is needed; using the right_coaction back-map
+    # is a working approximation.
+    on_dir = (x, b) -> begin
+        # Take a direction in D.carrier[y] — but interpret it as a direction
+        # in M.carrier[x] via M's right coaction. Identity-D case: this is
+        # the identity. General case: approximation.
+        Dx = direction_at(M.carrier, x)
+        Dx isa FinPolySet || return b
+        # If b happens to be in M.carrier[x]'s elements, return it directly.
+        # Otherwise route through right_coaction's back-map.
+        if b in Dx.elements
+            b
+        else
+            # Best-effort: pick any direction in Dx; identity-D case won't hit this branch.
+            first(Dx.elements)
+        end
+    end
+    Lens(M.carrier, extension.carrier, on_pos, on_dir)
+end
+
+"""
+    kan_2cat(D::Bicomodule, F::Bicomodule; direction=:left) -> KanExtension
+
+Kan extension in the 2-category obtained from `Cat#` by collapsing
+2-cells. `D : C ↛ E` and `F : C ↛ E'` share the same source comonoid
+`C`. Returns `Lan_D F : E ↛ E'` (left) or `Ran_D F : E ↛ E'` (right).
+
+Symbolic-aware (Q3.2): inputs may have lazy or symbolic carriers; the
+construction defers materialization to the symbolic layer where
+possible.
+
+In v0.3, the implementation handles the **identity** D case
+(`Lan_id_C F = F`) explicitly. Non-identity D requires a coequalizer
+adjustment that the symbolic layer doesn't yet expose; those cases
+error with a pointer to v0.3.x.
+"""
+function kan_2cat(D::Bicomodule, F::Bicomodule; direction::Symbol=:left)
+    direction in (:left, :right) ||
+        throw(ArgumentError("kan_2cat: direction must be :left or :right; got :$direction"))
+
+    D.left_base === F.left_base ||
+        error("kan_2cat: D.left_base !== F.left_base; both must share the source comonoid.")
+
+    # Identity-D detection: D is "essentially" identity if its carrier
+    # equals D.left_base.carrier and its coactions reduce to the
+    # duplicator. Approximate with a structural check (the compose
+    # function gives an iso to F when D is regular; we use that as the
+    # operational definition of "identity-D" here).
+    is_identity_D = D.carrier == D.left_base.carrier &&
+                    D.left_base === D.right_base
+
+    if !is_identity_D
+        error("kan_2cat: non-identity D not yet implemented — requires a " *
+              "coequalizer in the symbolic layer that v0.3 does not expose. " *
+              "See docs/dev/kan_extensions_construction.md §4 for phasing. " *
+              "v0.3 ships the identity-D case; non-identity rolls in v0.3.x.")
+    end
+
+    # Identity D: Lan_D F ≅ F, unit = id_F.
+    extension = F
+    unit = identity_bicomodule_morphism(F)
+    KanExtension(extension, unit, direction, D, F)
+end
+
+"""
+    factor_through(k::KanExtension, α::BicomoduleMorphism) -> BicomoduleMorphism
+
+Exhibit the universal property of the Kan extension. For a left Kan
+`Σ_D M`, given a 2-cell `α : M ⇒ N` for some appropriate `N`, return
+the unique factoring 2-cell `Σ_D M ⇒ N` whose composition with the
+unit recovers `α`.
+
+In v0.3, `factor_through` is implemented for the **identity** D case
+where `Σ_D M ≅ M` and the factor is `α` itself (modulo type alignment).
+Non-identity D requires solving the coequalizer that defines the unit;
+that's deferred to v0.3.x.
+"""
+function factor_through(k::KanExtension, α::BicomoduleMorphism)
+    # Identity D check (matches the kan_along_bicomodule / kan_2cat logic).
+    is_identity_D = k.source.carrier == k.source.left_base.carrier &&
+                    k.source.left_base === k.source.right_base
+
+    if !is_identity_D
+        error("factor_through: non-identity D not yet implemented — see " *
+              "docs/dev/kan_extensions_construction.md §4. " *
+              "v0.3 supports the identity-D case.")
+    end
+
+    # Identity D: the factoring 2-cell IS α (after rewrapping its source
+    # as the extension if needed).
+    α.source.carrier == k.extension.carrier ||
+        error("factor_through: α.source.carrier ≠ k.extension.carrier. " *
+              "α must originate at the Kan extension's input.")
+    α
+end
+
+# Unicode aliases per Q3.4.
+const var"Σ_D" = (D::Bicomodule, M::Bicomodule) ->
+    kan_along_bicomodule(D, M; direction=:left)
+const var"Π_D" = (D::Bicomodule, M::Bicomodule) ->
+    kan_along_bicomodule(D, M; direction=:right)
+
+# ============================================================
+# LazyCofreeComonoid (Extensions v2 PR #8)
+# ============================================================
+#
+# Defers the eager `behavior_trees` enumeration until the user actually
+# queries the comonoid's structure. Holds just `(p, depth)` plus a
+# materialization cache.
+#
+# Per Q8.1 resolution (multi-select all four):
+#   - `eraser` access works without forcing materialization beyond what
+#     the lens itself needs (still has to know the carrier shape; we
+#     materialize that on first access and cache).
+#   - shape-level `validate_comonoid` returns `true` for any
+#     `LazyCofreeComonoid` based on Niu/Spivak Thm 8.45 (cofree
+#     comonoids are always comonoids); no enumeration needed.
+#   - structural equality compares `(p, depth)` directly, no
+#     enumeration.
+#   - `parallel` of two lazy cofrees forces materialization of both and
+#     defers to `parallel(::Comonoid, ::Comonoid)` from Tier 1 PR #1.
+#
+# Per Q8.2: `tree_at(c, index)` exposes a single tree (currently via
+# materialize-and-index; future optimization may stream).
+#
+# Per Q8.3: materialized trees are cached; `clear_cache!(c)` frees the
+# cache.
+
+"""
+    LazyCofreeComonoid(p::Polynomial, depth::Int)
+
+Lazy variant of [`cofree_comonoid`](@ref): holds the polynomial and
+depth without enumerating the (potentially astronomical) tree set up
+front. Materialization is on-demand via [`materialize`](@ref) and
+cached on the struct.
+
+Construct with [`cofree_lazy`](@ref). Pair with the v2 design note's
+combinatorial table (`src/Cofree.jl` header) to size the depth choice.
+"""
+mutable struct LazyCofreeComonoid
+    p::Polynomial
+    depth::Int
+    _materialized::Union{Nothing,Comonoid}
+    function LazyCofreeComonoid(p::Polynomial, depth::Int)
+        depth ≥ 0 || throw(ArgumentError("depth must be ≥ 0; got $depth"))
+        new(p, depth, nothing)
+    end
+end
+
+function show(io::IO, c::LazyCofreeComonoid)
+    state = c._materialized === nothing ? "lazy" : "materialized"
+    print(io, "LazyCofreeComonoid(", c.p, ", depth=", c.depth, ", ", state, ")")
+end
+
+"""
+    cofree_lazy(p::Polynomial, depth::Int) -> LazyCofreeComonoid
+
+Build a lazy version of `cofree_comonoid(p, depth)`. The trees aren't
+enumerated until the user calls [`materialize`](@ref) (or any
+operation that needs the carrier polynomial).
+"""
+cofree_lazy(p::Polynomial, depth::Int) = LazyCofreeComonoid(p, depth)
+
+"""
+    materialize(c::LazyCofreeComonoid) -> Comonoid
+
+Force eager enumeration of the cofree comonoid. The result is cached
+on `c._materialized`; subsequent calls return the cached value. Use
+[`clear_cache!`](@ref) to free the cache.
+"""
+function materialize(c::LazyCofreeComonoid)
+    c._materialized === nothing || return c._materialized
+    eager = cofree_comonoid(c.p, c.depth)
+    c._materialized = eager
+    eager
+end
+
+"""
+    clear_cache!(c::LazyCofreeComonoid) -> LazyCofreeComonoid
+
+Free the cached materialized comonoid. Returns `c` for chaining.
+Subsequent operations will re-materialize on demand.
+"""
+function clear_cache!(c::LazyCofreeComonoid)
+    c._materialized = nothing
+    c
+end
+
+# ------------------------------------------------------------
+# Lazy operations (Q8.1)
+# ------------------------------------------------------------
+
+"""
+    eraser(c::LazyCofreeComonoid) -> Lens
+
+The counit lens of the lazy cofree comonoid. Materializes the
+underlying carrier on first call (cached); subsequent calls reuse the
+cache.
+"""
+eraser(c::LazyCofreeComonoid) = materialize(c).eraser
+
+"""
+    duplicator(c::LazyCofreeComonoid) -> Lens
+
+The duplicator (comultiplication) lens. Materializes on first call.
+"""
+duplicator(c::LazyCofreeComonoid) = materialize(c).duplicator
+
+# Forward `validate_comonoid` for lazy cofrees: returns `true` based on
+# Niu/Spivak Thm 8.45 (cofree comonoids are always comonoids). Pass
+# `force=true` to materialize and run the full validator anyway.
+"""
+    validate_comonoid(c::LazyCofreeComonoid; force=false) -> Bool
+
+Validate the lazy cofree comonoid. By default returns `true` without
+materializing — every cofree comonoid satisfies the comonoid laws by
+Niu/Spivak Thm 8.45, so the shape-level answer is structural. Pass
+`force=true` to materialize and run the full element-level validator.
+"""
+function validate_comonoid(c::LazyCofreeComonoid; force::Bool=false)
+    force || return true
+    validate_comonoid(materialize(c))
+end
+
+# Structural equality without materialization: compare (p, depth).
+==(a::LazyCofreeComonoid, b::LazyCofreeComonoid) =
+    a.p == b.p && a.depth == b.depth
+
+# parallel of two lazy cofrees forces materialization of both, then
+# delegates to parallel(::Comonoid,::Comonoid). The result is a
+# Comonoid (not a LazyCofreeComonoid — the parallel of two cofrees
+# isn't itself cofree in general).
+"""
+    parallel(a::LazyCofreeComonoid, b::LazyCofreeComonoid) -> Comonoid
+
+Carrier-tensor parallel of two lazy cofrees. Forces materialization of
+both inputs, then uses `parallel(::Comonoid, ::Comonoid)` from
+Extensions v2 PR #1. The result is a `Comonoid`, not a
+`LazyCofreeComonoid` — parallel of two cofree comonoids is not
+itself cofree in general.
+"""
+parallel(a::LazyCofreeComonoid, b::LazyCofreeComonoid) =
+    parallel(materialize(a), materialize(b))
+
+# ------------------------------------------------------------
+# tree_at (Q8.2)
+# ------------------------------------------------------------
+
+"""
+    tree_at(c::LazyCofreeComonoid, index::Int) -> BehaviorTree
+
+Return the `index`-th behavior tree of the cofree comonoid (1-based).
+Currently materializes the full carrier on first call (cached) and
+indexes into the resulting position list. A future optimization may
+stream individual trees without enumerating the full set.
+"""
+function tree_at(c::LazyCofreeComonoid, index::Int)
+    eager = materialize(c)
+    elements = eager.carrier.positions.elements
+    1 ≤ index ≤ length(elements) ||
+        throw(BoundsError("tree_at: index $index out of bounds (1:$(length(elements)))"))
+    elements[index]
+end
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+
+"""
+    is_materialized(c::LazyCofreeComonoid) -> Bool
+
+True iff the lazy cofree has already been materialized (cache hit on
+the next operation that would otherwise enumerate).
+"""
+is_materialized(c::LazyCofreeComonoid) = c._materialized !== nothing

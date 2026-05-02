@@ -860,3 +860,73 @@ Wrap [`to_latex`](@ref) in `\$\$ ... \$\$` delimiters so the result can be
 pasted into Markdown / Jupyter / a TeX document directly.
 """
 latex_display(x) = "\$\$ " * to_latex(x) * " \$\$"
+
+# ============================================================
+# free_variables — symbolic support (Extensions v2 PR #4)
+# ============================================================
+#
+# The symbolic counterpart of `support` (Polynomial.jl). For a SymExpr
+# tree, `free_variables(e)` returns the set of `SymVar` leaves — the
+# free variables in the expression. This is the "symbolic support":
+# the set of names the expression depends on.
+#
+# Per Q4.3 (resolved 2026-05-01), symbolic support ships alongside the
+# concrete `support` operator in PR #4 rather than a follow-up. For
+# concrete polynomials, `support` returns image-of-assignment; for
+# symbolic ones, the analog is the set of free variables in the
+# expression that "stands in" for the assignment.
+
+"""
+    free_variables(e::SymExpr) -> Set{SymVar}
+
+Walk a symbolic expression tree and collect every `SymVar` leaf. The
+result is a `Set` of `SymVar` (so duplicates are folded). Useful as the
+symbolic-side analog of `support` on concrete polynomials: it captures
+which named variables the expression structurally depends on.
+
+# Behavior
+
+  - `SymVar` leaf: returns `Set([leaf])`.
+  - `SymLit` leaf: returns an empty `Set` (no free variables).
+  - `SymOp(op, args)`: union of `free_variables` over `args`.
+
+The walk is purely structural — it does NOT account for binding
+constructs because the symbolic layer (as of v0.3) has no binders. If
+binders are added later, this function should be updated to respect
+scope.
+
+# Example
+
+```julia
+p, q = sympoly(:p), sympoly(:q)
+free_variables((p + q).expr)        # Set([SymVar(:p, :poly), SymVar(:q, :poly)])
+free_variables((p + sym_zero).expr) # Set([SymVar(:p, :poly)])
+free_variables(sym_y.expr)          # Set([SymVar(:y, :poly)])  or empty if y is a literal
+```
+"""
+function free_variables(e::SymVar)
+    Set{SymVar}([e])
+end
+
+function free_variables(e::SymLit)
+    Set{SymVar}()
+end
+
+function free_variables(e::SymOp)
+    out = Set{SymVar}()
+    for arg in e.args
+        union!(out, free_variables(arg))
+    end
+    out
+end
+
+"""
+    free_variables(p::SymbolicPolynomial) -> Set{SymVar}
+    free_variables(L::SymbolicLens) -> Set{SymVar}
+
+Forwarders that walk the underlying `expr` field of symbolic
+polynomials and lenses. Returns the same kind of `Set{SymVar}` as the
+core method.
+"""
+free_variables(p::SymbolicPolynomial) = free_variables(p.expr)
+free_variables(L::SymbolicLens) = free_variables(L.expr)

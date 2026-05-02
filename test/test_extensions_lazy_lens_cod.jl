@@ -117,15 +117,26 @@
     end
 
     # ============================================================
-    # 5. Joint Bicomodule construction at scale (PolyCDS v1.1 mirror)
+    # 5a. Joint Bicomodule construction at scale (PolyCDS v1.1 mirror)
     # ============================================================
-    @testset "Joint Bicomodule construction at scale" begin
-        # Two state-systems whose tensor would explode under eager subst.
+    #
+    # Split into two testsets. 5a builds a *large* carrier (4 × 5 = 20
+    # positions, 20 directions each) and asserts that construction +
+    # shape inspection are fast — these never enumerate the substitution
+    # polynomial, so size doesn't matter to runtime. 5b validates a
+    # *smaller* carrier where eager subst would still blow past the
+    # tabulate cap, demonstrating that the lazy-cod path goes through
+    # validate_bicomodule_detailed without eager enumeration. Splitting
+    # this way drops the testset wall-clock from ~5 minutes to a few
+    # seconds (validation is O(|carrier.positions| · |base_dirs| ·
+    # |carrier_dirs|²) — quartic in carrier size).
+    @testset "Joint Bicomodule construction at scale (no validate)" begin
         # state_system(S) has |S| positions × |S| directions; tensoring two
         # state systems gives a carrier with |S1|·|S2| positions × |S1|·|S2|
-        # directions per position. For |S1| = 4, |S2| = 5 we get a 20-position,
-        # 20-direction-each carrier, so subst(carrier, carrier) eagerly would
-        # have 20 · 20^20 ≈ 10^26 positions. Lazy keeps this constant-time.
+        # directions per position. For |S1| = 4, |S2| = 5 we get a 20-position
+        # × 20-direction-each carrier, so subst(carrier, carrier) eagerly
+        # would have 20 · 20^20 ≈ 10^26 positions. Lazy keeps this
+        # constant-time during construction.
         S1 = FinPolySet([:a1, :a2, :a3, :a4])
         S2 = FinPolySet([:b1, :b2, :b3, :b4, :b5])
 
@@ -154,10 +165,35 @@
         # have lazy cods.
         @test Mjoint.left_coaction.cod isa LazySubst
         @test Mjoint.right_coaction.cod isa LazySubst
+    end
 
-        # Validate the bicomodule axioms element-wise. The validator iterates
-        # over carrier and base positions/directions only — 20 × 20 outer
-        # × inner triples — not the substitution polynomial.
+    # ============================================================
+    # 5b. Joint Bicomodule validates through the lazy-cod path
+    # ============================================================
+    @testset "Joint Bicomodule validates with lazy cod" begin
+        # Smaller carrier so the quartic compatibility loop is fast, but
+        # still big enough that eager subst(carrier, carrier) would past
+        # the tabulate cap. For |S1|=2, |S2|=3 the carrier has 6 positions
+        # × 6 directions each, so eager subst would have 6 · 6^6 ≈ 280k
+        # positions — past TABULATE_SIZE_CAP (the lazy demonstration
+        # holds). Validation iterates 6^4 = 1296 inner triples: ~1s.
+        S1 = FinPolySet([:a1, :a2])
+        S2 = FinPolySet([:b1, :b2, :b3])
+
+        c1 = state_system_comonoid(S1)
+        c2 = state_system_comonoid(S2)
+
+        M1 = regular_bicomodule(c1)
+        M2 = regular_bicomodule(c2)
+
+        Mjoint = parallel(M1, M2)
+        @test cardinality(Mjoint.carrier.positions) == Finite(6)
+        @test Mjoint.left_coaction.cod isa LazySubst
+        @test Mjoint.right_coaction.cod isa LazySubst
+
+        # Validation iterates carrier × base × carrier-direction triples
+        # only — does not touch the substitution polynomial. Asserts the
+        # full lazy-cod path through validate_bicomodule_detailed works.
         result = validate_bicomodule_detailed(Mjoint)
         @test result.passed
     end

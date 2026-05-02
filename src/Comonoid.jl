@@ -383,17 +383,364 @@ end
 """
     ⊗(c::Comonoid, d::Comonoid) -> Comonoid
 
-The Dirichlet / parallel product on Comonoid. For small categories this
-coincides with the categorical product ([`*(::Comonoid, ::Comonoid)`](@ref)) —
-in `Cat#` the two operations are the same. Exposed under `⊗` for
-symmetry with `Polynomial ⊗`; the name signals "I'm composing in
-parallel" without forcing the user to remember the categorical-product
-equivalence.
+**Semantics changed in v0.3 (Extensions v2 PR #1, hard break).** Now an
+alias for [`parallel(::Comonoid, ::Comonoid)`](@ref) (the carrier-tensor
+matching `Polynomial ⊗`).
 
-If you want the proof of equivalence inline:
-`is_iso(c ⊗ d, c * d)` should hold for every pair of comonoids.
+In v0.2 this delegated to [`*(::Comonoid, ::Comonoid)`](@ref)
+(categorical product), which was inconsistent with `Polynomial`'s
+operator naming. The v0.3 design originally planned a soft break with a
+deprecation warning across one minor (`⊗` keeps v0.2 semantics in v0.3,
+flips in v0.4), but the implementation revealed that `⊗` and `parallel`
+are the *same function* via `const var"⊗" = parallel` in `Monoidal.jl`
+— a method on one IS a method on the other. The two cannot disagree
+for the same argument types. Per resolution 2026-05-01, the semantics
+flip moved up to v0.3.
+
+For users migrating from v0.2: replace `c ⊗ d` with `c * d` if you
+wanted the categorical product (now the only way to get it). The new
+`c ⊗ d` ≡ `parallel(c, d)` is the carrier-tensor; the two are iso as
+comonoids but use different direction-set encodings (morphism-pair vs
+direction-pair).
 """
-⊗(c::Comonoid, d::Comonoid) = c * d
+# `⊗(::Comonoid, ::Comonoid)` is automatically aliased to
+# `parallel(::Comonoid, ::Comonoid)` (defined below) via
+# `const var"⊗" = parallel` in Monoidal.jl. No explicit method needed.
+
+# ============================================================
+# parallel(::Comonoid, ::Comonoid) — carrier-tensor (Extensions v2 PR #1)
+# ============================================================
+#
+# The carrier-tensor of two comonoids: a comonoid whose carrier is the
+# Polynomial-level parallel product `c.carrier ⊗ d.carrier`, with
+# componentwise eraser and duplicator. This matches the direction-pair
+# encoding used by `Polynomial ⊗` and by `parallel(::Bicomodule, ::Bicomodule)`,
+# and differs from `*(::Comonoid, ::Comonoid)` (categorical product, which
+# uses morphism-pair encoding via the `to_category ↔ from_category`
+# bridge). The two are isomorphic but not structurally equal.
+#
+# Resolution log entry — design decision Q1.1 / Q1.2 (2026-05-01):
+# this is the public surface; `_comonoid_carrier_tensor` is now a
+# back-compat alias that points here.
+
+"""
+    parallel(c::Comonoid, d::Comonoid) -> Comonoid
+
+The **carrier-tensor** of two comonoids: a comonoid whose carrier is
+`parallel(c.carrier, d.carrier)` (i.e., `Polynomial ⊗`), with eraser
+and duplicator computed componentwise from the operand comonoids.
+
+This matches the direction-pair encoding used by `Polynomial ⊗` and is
+the construction that pairs naturally with [`parallel(::Bicomodule, ::Bicomodule)`](@ref).
+Use this when you want carriers to tensor as polynomials (e.g., joint
+state spaces formed from per-component comonoids); use
+[`*(::Comonoid, ::Comonoid)`](@ref) when you want the categorical
+product (small categories: pairs of objects, pairs of morphisms).
+
+The two constructions are isomorphic as comonoids but use different
+direction encodings.
+
+The result is validated at construction time (Q1.2 resolution): the
+returned comonoid passes `validate_comonoid`. An invalid carrier-tensor
+indicates a bug in the operand comonoids — surfaced by an error from
+this constructor rather than silently propagating.
+
+# Example
+
+```julia
+S = FinPolySet([:s1, :s2])
+T = FinPolySet([:t1, :t2, :t3])
+cs = state_system_comonoid(S)
+ct = state_system_comonoid(T)
+
+joint = parallel(cs, ct)
+# joint.carrier === parallel(cs.carrier, ct.carrier)
+# cardinality(joint.carrier.positions) == Finite(6)   # |S|·|T|
+@assert validate_comonoid(joint)
+```
+"""
+function parallel(c::Comonoid, d::Comonoid)
+    new_carrier = parallel(c.carrier, d.carrier)
+
+    new_eraser = Lens(new_carrier, y,
+        _ -> :pt,
+        (st, _pt) -> begin
+            s, t = st
+            c_id = c.eraser.on_directions.f(s).f(:pt)
+            d_id = d.eraser.on_directions.f(t).f(:pt)
+            (c_id, d_id)
+        end)
+
+    new_dup_on_pos = st -> begin
+        s, t = st
+        s_dup, jbar_c = c.duplicator.on_positions.f(s)
+        t_dup, jbar_d = d.duplicator.on_positions.f(t)
+        carrier_dirs = direction_at(new_carrier, st)::FinPolySet
+        jbar_combined = Dict{Any,Any}()
+        for ab in carrier_dirs.elements
+            a, b = ab
+            jbar_combined[ab] = (jbar_c[a], jbar_d[b])
+        end
+        ((s_dup, t_dup), jbar_combined)
+    end
+    new_dup_on_dir = (st, ab_pair) -> begin
+        s, t = st
+        # ab_pair = ((a1, a2), (b1, b2)).
+        ab1, ab2 = ab_pair
+        a1, a2 = ab1
+        b1, b2 = ab2
+        c_dir = c.duplicator.on_directions.f(s).f((a1, b1))
+        d_dir = d.duplicator.on_directions.f(t).f((a2, b2))
+        (c_dir, d_dir)
+    end
+    new_dup = Lens(new_carrier, subst_lazy(new_carrier, new_carrier),
+                   new_dup_on_pos, new_dup_on_dir)
+
+    result = Comonoid(new_carrier, new_eraser, new_dup)
+
+    # Q1.2 (resolved 2026-05-01): validate at construction. The internal
+    # `_comonoid_carrier_tensor` did not validate; the public surface does.
+    # If both inputs are valid comonoids the result is valid by
+    # construction, so this catches operand bugs rather than its own.
+    validate_comonoid(result) ||
+        error("parallel(::Comonoid, ::Comonoid): result failed " *
+              "validate_comonoid; operands likely invalid")
+
+    result
+end
+
+# ============================================================
+# free_category_comonoid (Extensions v2, PR #14)
+# ============================================================
+#
+# `free_category_comonoid(vertices, edges; max_depth)` builds the comonoid
+# corresponding to the free category on a directed graph. Convenience
+# wrapper over `from_category` that saves the user from constructing the
+# `SmallCategory` by hand.
+#
+# Acyclic graphs: full free category. Every path is a distinct morphism;
+# composition is path concatenation; identity is the empty path.
+#
+# Cyclic graphs: the free category is genuinely infinite. Per Q14.2
+# (Extensions v2, 2026-05-01), this function takes a `max_depth` keyword
+# and returns the depth-bounded truncation, emitting an `@warn` so the
+# user knows the result is *not* a valid free comonoid (composites whose
+# path length exceeds `max_depth` are filled in with a sentinel — the
+# source identity — so the composition table stays total and downstream
+# code like `validate_comonoid` runs without crashing; the sentinels are
+# mathematically wrong, and `validate_comonoid` reports them as
+# category-law failures, which is the structural form of "this isn't a
+# valid free comonoid").
+
+# Internal: detect a cycle in the directed graph via DFS with three colors.
+# Returns true if any cycle reachable from any vertex.
+function _graph_has_cycle(vertices, out_edges::Dict)
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = Dict{Any,Int}(v => WHITE for v in vertices)
+    function dfs(v)
+        color[v] = GRAY
+        for (_, t) in out_edges[v]
+            if color[t] == GRAY
+                return true
+            elseif color[t] == WHITE
+                dfs(t) && return true
+            end
+        end
+        color[v] = BLACK
+        return false
+    end
+    for v in vertices
+        if color[v] == WHITE
+            dfs(v) && return true
+        end
+    end
+    return false
+end
+
+# Internal: normalize a single edge into the canonical (src, tgt, label) form.
+# Two-tuples auto-label by their position in the edges vector.
+function _normalize_edge(e, autolabel::Int)
+    if e isa Tuple
+        if length(e) == 2
+            return (e[1], e[2], autolabel)
+        elseif length(e) == 3
+            return (e[1], e[2], e[3])
+        end
+    end
+    error("free_category_comonoid: edge $e has unexpected shape; " *
+          "expected (src, tgt) or (src, tgt, label) tuple")
+end
+
+"""
+    free_category_comonoid(vertices, edges; max_depth=nothing) -> Comonoid
+
+Build the comonoid corresponding to the free category on a directed graph.
+
+  - `vertices` — an `AbstractVector` (or anything with `collect`-able
+    elements) of vertex labels.
+  - `edges` — a `Vector` of edge tuples. Each tuple is either
+    `(src, tgt)` (label auto-generated from position in the vector) or
+    `(src, tgt, label)` (user-supplied label). Mixing the two forms in
+    the same call is supported via per-edge dispatch on tuple arity.
+  - `max_depth` — optional `Int`. Required when the graph contains
+    cycles; ignored for acyclic graphs. Specifies the maximum path length
+    to include in the truncation.
+
+# Acyclic input
+
+Returns the full free category as a `Comonoid`. Morphisms are paths
+through the graph; identity at each vertex is the empty path; composition
+is path concatenation. The result passes [`validate_comonoid`](@ref).
+
+```julia
+# Path: A → B → C
+free_category_comonoid([:A, :B, :C], [(:A, :B), (:B, :C)])
+```
+
+# Cyclic input
+
+The free category on a cyclic graph is infinite, so this function
+truncates at `max_depth` and emits an `@warn`. **The truncated result
+is not a valid free comonoid:** composites whose path-length would
+exceed `max_depth` are filled in with a *sentinel* — the source identity
+at the relevant domain — so the composition table stays total and
+[`validate_comonoid`](@ref) runs cleanly rather than throwing. Because
+the sentinels are mathematically wrong, validation returns `false` and
+reports the category-law failures (typically associativity and identity
+violations on the sentinel rows). The warning is the user's signal that
+the truncation is in effect; the validation failures are the structural
+manifestation of the same fact.
+
+```julia
+# Cyclic: A → B → A
+free_category_comonoid([:A, :B], [(:A, :B), (:B, :A)]; max_depth=3)
+# @warn: graph contains cycles; returning depth-bounded truncation...
+```
+
+For users who want the full lazy infinite version, the planned `LazyCofreeComonoid`
+work (Extensions v2 #8) is the right tool once it lands.
+
+# Mixed labeled / unlabeled edges
+
+```julia
+free_category_comonoid([:A, :B, :C],
+                       [(:A, :B, :forward),     # explicitly labeled
+                        (:B, :C),               # auto-labeled by position
+                        (:A, :C, :shortcut)])
+```
+"""
+function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
+                                max_depth::Union{Int,Nothing}=nothing)
+    # Deduplicate vertices; preserve order.
+    seen = Set{Any}()
+    verts = Any[]
+    for v in vertices
+        v in seen || (push!(seen, v); push!(verts, v))
+    end
+
+    # Normalize edges; build adjacency.
+    out_edges = Dict{Any,Vector{Tuple{Any,Any}}}(v => Tuple{Any,Any}[] for v in verts)
+    edge_labels_seen = Dict{Any,Set{Any}}(v => Set{Any}() for v in verts)
+    for (i, e) in enumerate(edges)
+        s, t, l = _normalize_edge(e, i)
+        s in seen || error("free_category_comonoid: edge source $s not in vertices")
+        t in seen || error("free_category_comonoid: edge target $t not in vertices")
+        l in edge_labels_seen[s] &&
+            error("free_category_comonoid: duplicate edge label $l from vertex $s; " *
+                  "supply explicit unique labels for parallel edges")
+        push!(edge_labels_seen[s], l)
+        push!(out_edges[s], (l, t))
+    end
+
+    # Cycle detection. Acyclic input: max_depth ignored. Cyclic + no
+    # max_depth: error. Cyclic + max_depth: warn and truncate.
+    has_cycle = _graph_has_cycle(verts, out_edges)
+    if has_cycle && max_depth === nothing
+        error("free_category_comonoid: graph contains cycles; supply `max_depth` " *
+              "to get a depth-bounded truncation, or remove the cycles")
+    end
+    if has_cycle
+        @warn "free_category_comonoid: graph contains cycles; returning depth-" *
+              "bounded truncation (paths up to length $max_depth). The result is " *
+              "NOT a valid free comonoid — `validate_comonoid` will report " *
+              "missing compositions. See the docstring for details."
+    end
+
+    depth_bound = has_cycle ? max_depth : typemax(Int)
+
+    # Enumerate morphisms: a morphism is `(start_vertex, label_tuple)`
+    # where the label tuple is the empty `()` for the identity, or a
+    # non-empty tuple of edge labels otherwise.
+    morphisms = Tuple[]
+    morphism_dom = Dict{Any,Any}()
+    morphism_cod = Dict{Any,Any}()
+
+    # Identity at each vertex.
+    for v in verts
+        m = (v, ())
+        push!(morphisms, m)
+        morphism_dom[m] = v
+        morphism_cod[m] = v
+    end
+
+    # Non-empty paths: BFS from every vertex up to depth_bound.
+    for start in verts
+        # frontier = vector of (current_vertex, path_label_tuple)
+        frontier = [(start, ())]
+        len = 0
+        while !isempty(frontier) && len < depth_bound
+            len += 1
+            next_frontier = Tuple[]
+            for (cur, path) in frontier
+                for (label, tgt) in out_edges[cur]
+                    new_path = (path..., label)
+                    m = (start, new_path)
+                    push!(morphisms, m)
+                    morphism_dom[m] = start
+                    morphism_cod[m] = tgt
+                    push!(next_frontier, (tgt, new_path))
+                end
+            end
+            frontier = next_frontier
+        end
+    end
+
+    morphisms_set = FinPolySet(morphisms)
+    morphism_id_set = Set(morphisms)
+
+    morphism_identity = Dict{Any,Any}(v => (v, ()) for v in verts)
+
+    # Composition: concatenate paths whenever the composite is within depth.
+    # In the truncated case, composites that would exceed `depth_bound` get
+    # a *sentinel* entry (the source identity) so that the composition table
+    # stays total — `from_category` builds a `Lens` whose `on_directions`
+    # indexes this dict, and a missing key would crash `to_category` /
+    # `validate_comonoid` rather than fail gracefully. The sentinel is
+    # mathematically wrong (the real composite is a longer path), so
+    # `validate_comonoid` reports the discrepancy as a category-laws
+    # violation — which is exactly the structural manifestation of
+    # "this isn't a valid free comonoid" the docstring promises.
+    composition = Dict{Any,Any}()
+    for f in morphisms
+        for g in morphisms
+            morphism_dom[g] == morphism_cod[f] || continue
+            (vstart_f, path_f) = f
+            (_,        path_g) = g
+            composed = (vstart_f, (path_f..., path_g...))
+            if composed in morphism_id_set
+                composition[(f, g)] = composed
+            else
+                # Out-of-depth sentinel: the source identity at f's domain.
+                # Categorically wrong; lets validation fail gracefully.
+                composition[(f, g)] = morphism_identity[morphism_dom[f]]
+            end
+        end
+    end
+
+    cat = SmallCategory(FinPolySet(verts), morphisms_set,
+                        morphism_dom, morphism_cod, morphism_identity, composition)
+    from_category(cat)
+end
 
 # ============================================================
 # Validation
@@ -968,4 +1315,72 @@ function validate_retrofunctor_detailed(F::Retrofunctor; strict::Bool=true,
     end
 
     isempty(failures) ? pass("retrofunctor (element-wise)") : fail(failures)
+end
+
+# ============================================================
+# comonoid_from_data (Extensions v2 PR #5)
+# ============================================================
+#
+# Authoring helper: build a `Comonoid` from explicit Dicts of
+# eraser / duplicator data, without hand-building the underlying
+# `Lens` objects. Mirrors the bicomodule_from_data API. Validates the
+# result by default; pass `validate=false` to skip (Q5.2).
+
+"""
+    comonoid_from_data(
+        carrier::Polynomial;
+        eraser_table::AbstractDict,            # pos -> identity_direction at pos
+        duplicator_emit::AbstractDict,         # (pos, dir) -> next_pos
+        duplicator_compose::AbstractDict,      # (pos, dir1, dir2) -> composed_dir
+        validate::Bool=true,
+    ) -> Comonoid
+
+Build a `Comonoid` from authored data tables, constructing the eraser
+and duplicator lenses internally.
+
+  - `eraser_table[pos]` is the identity direction at `pos` (the result of
+    the eraser's on_directions when given a `:pt` y-direction).
+  - `duplicator_emit[(pos, dir)]` is the codomain of the morphism `dir` at
+    `pos` — the `jbar` value the duplicator's on_positions returns.
+  - `duplicator_compose[(pos, dir1, dir2)]` is the composed direction
+    `dir1 ; dir2` viewed at `pos` — the result of the duplicator's
+    on_directions on the pair.
+
+When `validate=true` (default), the result is run through
+[`validate_comonoid`](@ref); failure raises an `ArgumentError` with the
+underlying validation summary so authoring mistakes surface immediately.
+Pass `validate=false` for intermediate constructions you'll validate
+later.
+"""
+function comonoid_from_data(carrier::Polynomial;
+                            eraser_table::AbstractDict,
+                            duplicator_emit::AbstractDict,
+                            duplicator_compose::AbstractDict,
+                            validate::Bool=true)
+    eraser = Lens(carrier, y,
+                  _ -> :pt,
+                  (i, _) -> eraser_table[i])
+
+    dup_on_pos = i -> begin
+        Di = direction_at(carrier, i)::FinPolySet
+        jbar = Dict(a => duplicator_emit[(i, a)] for a in Di.elements)
+        (i, jbar)
+    end
+    dup_on_dir = (i, ab) -> begin
+        a, b = ab
+        duplicator_compose[(i, a, b)]
+    end
+
+    duplicator = Lens(carrier, subst_lazy(carrier, carrier),
+                      dup_on_pos, dup_on_dir)
+
+    result = Comonoid(carrier, eraser, duplicator)
+
+    if validate
+        r = validate_comonoid_detailed(result)
+        r.passed || throw(ArgumentError(
+            "comonoid_from_data: validation failed — " * r.summary *
+            "; pass `validate=false` to skip."))
+    end
+    result
 end

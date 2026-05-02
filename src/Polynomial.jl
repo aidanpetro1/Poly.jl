@@ -96,6 +96,19 @@ monomial(I::PolySet, A::PolySet) = Polynomial(I, _ -> A)
 "The representable polynomial `y^A`. One position, direction-set `A`."
 representable(A::PolySet) = Polynomial(FinPolySet([:pt]), _ -> A)
 
+# Convenience: skip the `FinPolySet` wrap when the user has the elements as
+# a Vector or Set already (Extensions v2, PR #12).
+"""
+    representable(v::AbstractVector) -> Polynomial
+    representable(s::AbstractSet)    -> Polynomial
+
+`representable(v)` is shorthand for `representable(FinPolySet(v))`. Useful
+when authoring polynomials by hand without an intermediate `FinPolySet`
+binding.
+"""
+representable(v::AbstractVector) = representable(FinPolySet(v))
+representable(s::AbstractSet)    = representable(FinPolySet(collect(s)))
+
 # Predicates ---------------------------------------------------------
 
 function _all_directions_empty(p::Polynomial)
@@ -477,3 +490,121 @@ function _center(s::AbstractString, w::Int)
     right = pad - left
     return repeat(" ", left) * s * repeat(" ", right)
 end
+
+# ============================================================
+# PolyElement + support (Extensions v2 PR #4)
+# ============================================================
+#
+# `PolyElement(p, position, assignment)` is the canonical handle for
+# "an element of `p(S)`": a position `i ∈ p(1)` and an assignment
+# `f : p[i] → S`. Per Q4.1 (resolved 2026-05-01), this is the wrapper
+# that `support` is primarily defined on; pair-of-args forwards exist
+# for ergonomics.
+#
+# `support(::PolyElement)` computes the Fairbanks-style support — the
+# minimal `U ⊆ S` such that for any `f, g : S → T` with `f|_U = g|_U`,
+# we have `f·φ = g·φ` (Q4.4). For polynomial functors specifically this
+# coincides with strong support and equals `image(assignment)`.
+
+"""
+    PolyElement(p, position, assignment)
+
+A handle for an element `φ ∈ p(S)`: position `i = position` and
+assignment `f = assignment` viewed as a function `p[i] → S`.
+
+`assignment` accepts any of:
+  - a `PolyFunction` with domain `p[position]`
+  - an `AbstractDict` keyed by elements of `p[position]`
+  - any callable `f(k)` returning an element of `S` for `k ∈ p[position]`
+
+The codomain set `S` is *not* tracked explicitly — `support` returns
+the image of the assignment, which is a subset of S regardless of how
+S is represented externally.
+"""
+struct PolyElement{P}
+    p::P
+    position::Any
+    assignment::Any
+    function PolyElement(p::P, position, assignment) where {P}
+        new{P}(p, position, assignment)
+    end
+end
+
+function show(io::IO, e::PolyElement)
+    print(io, "PolyElement(position=", repr(e.position), ")")
+end
+
+# Internal: evaluate the assignment at a key. Handles the three forms.
+function _apply_assignment(assignment, k)
+    if assignment isa AbstractDict
+        return assignment[k]
+    elseif assignment isa PolyFunction
+        return assignment.f(k)
+    elseif assignment isa Function
+        return assignment(k)
+    else
+        # Last-resort: try indexing.
+        try
+            return assignment[k]
+        catch
+            return assignment(k)
+        end
+    end
+end
+
+"""
+    support(e::PolyElement) -> FinPolySet
+    support(p, position, assignment) -> FinPolySet
+
+Fairbanks-style support of an element `φ ∈ p(S)`: the minimal subset of
+`S` that `φ` depends on. For polynomial functors, this coincides with
+strong support and equals the image of `assignment` (per design note
+§4.2, Q4.4).
+
+The returned `FinPolySet` enumerates the distinct values of the
+assignment over `p[position]`.
+
+# Empty support
+
+When `p[position]` is empty (a constant position), the assignment has
+no inputs and the support is the empty set — captured as
+`FinPolySet(eltype(...)[])`. Constant polynomials thus have empty
+support at every position.
+
+# Relationship to strong support
+
+Per Fairbanks (Topos blog, "Set-sets"), strong support is the smallest
+`U ⊆ S` such that `φ ∈ image(p(U → S))`. For polynomials this equals
+the image-of-assignment definition above. The two notions diverge for
+polynomials with equations (i.e., presented Set-sets), at which point
+the more refined Fairbanks definition is needed; the API keeps the
+support name to leave room for that future extension.
+"""
+function support(e::PolyElement{<:ConcretePolynomial})
+    Xi = direction_at(e.p, e.position)
+    Xi isa FinPolySet ||
+        error("support: requires p[position] to be a FinPolySet; got $(typeof(Xi))")
+
+    # For a constant position (empty direction-set), the assignment has
+    # no inputs and the image is empty. We still return a typed empty
+    # FinPolySet.
+    if isempty(Xi.elements)
+        return FinPolySet(Any[])
+    end
+
+    # Iterate distinct image values, preserving first-occurrence order.
+    seen = Set{Any}()
+    out = Any[]
+    for k in Xi.elements
+        v = _apply_assignment(e.assignment, k)
+        if !(v in seen)
+            push!(seen, v)
+            push!(out, v)
+        end
+    end
+    FinPolySet(out)
+end
+
+# Pair-of-args forwarder.
+support(p::ConcretePolynomial, position, assignment) =
+    support(PolyElement(p, position, assignment))

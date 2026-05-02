@@ -128,6 +128,43 @@ lexicographically-smallest one. Useful for `validate_bicomodule` where the
 compatibility-square check enumerates `(x, b, a)` triples and the user
 benefits from being pointed at the *smallest* failing triple, not just the
 first one encountered.
+
+# Worked example
+
+Build an intentionally-broken bicomodule (a right coaction whose direction
+map disagrees with the left coaction at one specific triple), validate it
+in `:all` mode to collect every failing triple, and use
+`minimal_failing_triple` to surface the smallest one for debugging:
+
+```julia
+S = FinPolySet([:a, :b])
+cs = state_system_comonoid(S)
+
+# A right coaction that lies at one specific (x, b, a) triple, breaking
+# direction-level compatibility with the well-formed left coaction.
+bad_right_on_dir = (i, ab) -> begin
+    a, b = ab
+    (i == :a && a == :a && b == :b) ? :a : b
+end
+bad_right = Lens(cs.carrier, subst(cs.carrier, cs.carrier),
+                 s -> (s, Dict(t => t for t in S.elements)),
+                 bad_right_on_dir)
+B = Bicomodule(cs.carrier, cs, cs, cs.duplicator, bad_right)
+
+# Run validation with `verbose=:all` so every failing triple is recorded,
+# not just the first one.
+result = validate_bicomodule_detailed(B; verbose=:all)
+@assert !result.passed
+
+# Surface the lex-smallest failing (x, b, a) triple for debugging.
+worst = minimal_failing_triple(result.failures)
+@show worst.law              # :compatibility_directions (or :compatibility_positions)
+@show worst.location         # (x, b, a) — the smallest triple that broke
+@show worst.structural_hint  # human-readable description of *what* broke
+```
+
+Pair this with `result.summary` for a one-line categorical description of
+which axiom class failed.
 """
 function minimal_failing_triple(failures::Vector{ValidationFailure})
     triples = filter(f -> length(f.location) == 3, failures)
