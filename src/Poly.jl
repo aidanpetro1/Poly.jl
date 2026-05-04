@@ -42,9 +42,12 @@ export
     Cardinality, Finite, CountablyInfinite, Continuum, SymbolicCardinality,
     CardinalityExpr, isfinite_card,
 
+    # Named polynomials — aggregation building blocks (v0.5.1)
+    list_polynomial,
+
     # PolySet
     PolySet, FinPolySet, NatSet, IntSet, RealSet, IntervalSet,
-    ProductSet, SumSet, ExpSet, SymbolicSet, cardinality,
+    ProductSet, SumSet, ExpSet, SymbolicSet, SymbolicCoequalizer, cardinality,
 
     # PolyFunction / DependentFunction
     PolyFunction, tabulate, untabulate, identity_polyfunction,
@@ -56,13 +59,17 @@ export
     y, zero_poly, one_poly,
     constant, linear, monomial, representable,
     is_constant, is_linear, is_monomial, is_representable,
+    # Reflexive predicate (v0.6.1, FA Example 7.2). True iff `weak_dual`
+    # is invertible at p — equivalently, p is representable or linear.
+    is_reflexive,
     is_iso, is_iso_strict,
     # Element handle + support (Extensions v2 PR #4).
     PolyElement, support,
     apply, cardinality_of_apply, corolla_forest,
 
     # Lens
-    Lens, identity_lens, compose, lens_count, polybox,
+    AbstractLens, Lens, identity_lens, compose, lens_count, polybox,
+    dom, cod, on_positions, on_directions, is_deterministic,
     # Lens back-direction inspection (Extensions v2 PR #6).
     BackDirectionTable, back_directions,
 
@@ -98,6 +105,14 @@ export
     internal_hom, sections, section_lens, do_nothing_section,
     eval_lens, derivative,
 
+    # Coclosure of ◁ (v0.6.1, FA Prop 2.16 / Niu/Spivak Remark 2.17).
+    # `coclosure(q, p) = [q/p]` — the polynomial Σ_{i ∈ p(1)} y^{q(p[i])}.
+    # Adjunction: Poly([q/p], p′) ≅ Poly(p, p′ ◁ q). Equivalently the
+    # left Kan extension of q along p when both are polynomial functors
+    # `Set → Set`. v0.6.1 ships the FinPolySet case; v0.7 adds the
+    # symbolic / NatSet path needed for the unbounded list polynomial.
+    coclosure,
+
     # Dynamical systems (Sprint 6). Note: `step` is a method extension of
     # `Base.step` rather than a freshly-exported name, so it's not in this
     # list — `using Poly` is enough; `step(φ, s, d)` dispatches via Base.
@@ -120,14 +135,28 @@ export
     to_category, from_category,
     validate_category_laws, validate_comonoid,
     validate_retrofunctor,
+    # Forward-action validator for partial-image retrofunctors (v0.5).
+    # Use when `F.forward_on_directions` is populated (e.g.
+    # `tuple_retrofunctor` of cofree morphisms) and the back-action is
+    # undefined on non-image cod-directions.
+    validate_retrofunctor_forward,
     state_system_comonoid, discrete_comonoid, monoid_comonoid,
+    # Comonoid on the coclosure `[p/p]` (v0.6.1, FA Example 5.5 / Lemma 8.7).
+    # The "full internal subcategory spanned by p". Specialized to the list
+    # polynomial via `comonoid_from_list_polynomial` in `Demos.jl`.
+    comonoid_from_coclosure,
     identity_retrofunctor,
-    # Free category on a graph (Extensions v2, PR #14).
-    # `free_category_comonoid` deprecated in v0.3.1 (depwarn forwarder
-    # to `free_labeled_transition_comonoid`); removed in v0.4.
-    free_category_comonoid, free_labeled_transition_comonoid,
+    # Free category on a graph. Canonical builder for D / P_d in
+    # PolyCDS / Cat#-style modeling. (Extensions v2 PR #14 → v0.3.1 rename
+    # → v0.4 standalone.)
+    free_labeled_transition_comonoid,
     # Authoring helper (Extensions v2 PR #5).
     comonoid_from_data,
+    # Categorical-style accessors (v0.5.1, Comonoid ergonomics). Wrappers
+    # around `direction_at` and `c.duplicator.on_positions` for callers
+    # thinking in categorical terms ("morphisms out of `a`", "codomain of
+    # `f`") rather than polynomial-level plumbing.
+    morphisms_out_of, cod_in_comonoid,
 
     # Validation results (Extensions v1, PR #6). Public `validate_*` return
     # `Bool` for back-compat with `@test` and existing call sites. Each has
@@ -137,12 +166,18 @@ export
     ValidationResult, ValidationFailure, minimal_failing_triple,
     validate_category_laws_detailed, validate_comonoid_detailed,
     validate_retrofunctor_detailed,
+    validate_retrofunctor_forward_detailed,
 
     # Cofree comonoid + comodules + bicomodules (Sprint 8)
     BehaviorTree, behavior_trees, tree_paths, tree_walk,
     # Path-dict builder for BehaviorTree (v0.3.x).
     behavior_tree_from_paths,
     cofree_comonoid, cofree_unit, cofree_universal,
+    # Cofree on a comonoid (v0.4 #4).
+    CofreeOverComonoid,
+    # Cat# vertical–horizontal interaction bundle (v0.4.x #5).
+    base_change_left, base_change_right,
+    cofree_morphism, tuple_retrofunctor,
     RightComodule, regular_right_comodule,
     validate_right_comodule, validate_right_comodule_detailed,
     LeftComodule, regular_left_comodule,
@@ -178,6 +213,25 @@ export
     # already gets re-exported via `import Base: +, *`.
     var"⊙",
 
+    # Cat# inspection + duality bundle (v0.5.1 minimum surface for
+    # PolyAggregation.jl v0.1.x). Lives in `src/CatSharp.jl`. v0.6 extends
+    # with `bridge_diagram` (Prop 3.20) and `span_from_linear_bicomodule`
+    # (Cor 6.17 reverse direction); `weak_dual` (single-var Dirichlet,
+    # Niu/Spivak Prop 4.85 / FA Theorem 7.19 alias) lives in `Monoidal.jl`;
+    # `comonoid_from_list_polynomial` (Def 8.6 second half) lives in
+    # `Demos.jl` as a v0.6 stub pending design resolution. Note:
+    # `is_linear` is already exported above for the polynomial predicate;
+    # the v0.5.1 method on `::Bicomodule` coexists via multiple dispatch.
+    # `is_conjunctive` + `ConjunctiveBicomodule` and the `Span{A,B}`
+    # struct + finite-set pullback remain pending v0.6 follow-up — none
+    # block PolyAggregation v0.3.0.
+    LinearBicomodule, linear_bicomodule_from_span, c_one_y,
+    bridge_diagram, BridgeDiagram, span_from_linear_bicomodule,
+    weak_dual,
+    # comonoid_from_list_polynomial: v0.6 stub → v0.6.1 real (FA Lemma 8.7).
+    # Carrier is `[u/u]`, NOT u itself — see docstring in `Demos.jl`.
+    comonoid_from_list_polynomial,
+
     # Macros
     @poly,
 
@@ -212,6 +266,11 @@ include("Validation.jl")
 include("Dynamical.jl")
 include("Comonoid.jl")
 include("Cofree.jl")
+# Cat# inspection + duality bundle (v0.5.1 minimum surface). Depends on
+# `Bicomodule` (Cofree.jl) and `Comonoid` (Comonoid.jl). v0.6 will extend
+# this file with `bridge_diagram`, `is_conjunctive`/`ConjunctiveBicomodule`,
+# and the reverse-span machinery.
+include("CatSharp.jl")
 include("Macros.jl")
 include("Symbolic.jl")
 include("Demos.jl")

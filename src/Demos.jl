@@ -765,3 +765,156 @@ function _symbolic_demo()
     println("\n== Symbolic layer demo passed. ==")
     true
 end
+
+# ============================================================
+# Named polynomials — aggregation building blocks (v0.5.1)
+# ============================================================
+
+# aggregation building block — used by PolyAggregation.jl's universal aggregator
+"""
+    list_polynomial(; max_size::Union{Int,Nothing}=nothing) -> Polynomial
+
+The list polynomial `u = Σ_{N ∈ ℕ} y^N` of Spivak/Garner/Fairbanks Def 8.6 —
+the universal "collect-into-a-list" polynomial. The carrier of the universal
+aggregator in `Cat#`.
+
+  - Without `max_size`: positions is `NatSet()` (cardinality
+    `CountablyInfinite()`), and `direction_at(u, N)` is `FinPolySet(1:N)` —
+    the `N` row indices. Use this form for symbolic / lazy / infinite-`N`
+    reasoning.
+
+  - With `max_size = K`: positions is `FinPolySet(0:K)` (cardinality
+    `Finite(K+1)`), suitable for finite enumeration and tests. Same
+    direction-set rule.
+
+Errors if `max_size < 0`.
+
+The Kleisli triple `(u, η, μ)` exhibiting `u` as the free-monoid monad on
+`Set` will ship in v0.6 alongside `comonoid_from_list_polynomial`; this
+v0.5.1 patch ships only the polynomial.
+
+# Examples
+```julia
+u = list_polynomial()                       # Σ_{N ∈ ℕ} y^N (positions = ℕ)
+u_fin = list_polynomial(max_size=5)         # Σ_{N=0..5} y^N
+
+cardinality(positions(u_fin))               # Finite(6)
+direction_at(u_fin, 3) == FinPolySet([1,2,3])
+cardinality(direction_at(u, 7))             # Finite(7)
+```
+"""
+function list_polynomial(; max_size::Union{Int,Nothing}=nothing)
+    direction_fn = N -> FinPolySet(collect(1:N))
+    if max_size === nothing
+        return Polynomial(NatSet(), direction_fn)
+    end
+    max_size >= 0 ||
+        error("list_polynomial: max_size must be ≥ 0, got $max_size")
+    Polynomial(FinPolySet(collect(0:max_size)), direction_fn)
+end
+
+# ============================================================
+# comonoid_from_list_polynomial — Lemma 8.7 (v0.6.1)
+# ============================================================
+#
+# Spivak/Garner/Fairbanks **Lemma 8.7**: the induced comonad structure
+# on the **left Kan extension** of `u` along itself, `[u/u]`, viewed as
+# a category, is a skeleton of `Fin^op`. The comonoid lives on `[u/u]`
+# (the coclosure of `◁`, Prop 2.16), **not** on `u` itself. With the
+# v0.5.1 carrier shape `direction_at(u, N) == FinPolySet(1:N)`, this
+# resolves the apparent obstruction at N=0 (no comonoid on u directly,
+# but a perfectly well-defined comonoid on `[u/u]`):
+#
+#   - `[u/u]` has positions `u(1) = ℕ` (or `{0,...,K}` after truncation).
+#   - `[u/u][N] = u(u[N]) = u({1,...,N})` — pairs `(j, g)` with
+#     `j ∈ ℕ` and `g : {1,...,j} → {1,...,N}` a function.
+#   - At `N=0`, `u[0] = ∅`, so `u(∅) = {(0, ∅-function)}` (the empty
+#     function is well-defined, and its codomain set is non-empty),
+#     giving exactly **one** direction = the identity at object 0.
+#
+# This v0.6.1 implementation requires `u` to be a **finite truncation**
+# `list_polynomial(max_size=K)` because the underlying [`coclosure`](@ref)
+# operation is currently FinPolySet-only. The unbounded
+# `list_polynomial()` (with `NatSet()` positions) ships when v0.7's
+# symbolic-positions pass extends `coclosure` to non-finite carriers.
+# The truncation `K` controls how much of Fin^op is realized: morphisms
+# `N → N'` exist for all `N, N' ≤ K`, with composition matching Fin
+# (i.e., function composition reversed).
+
+"""
+    comonoid_from_list_polynomial(u::AbstractPolynomial) -> Comonoid
+
+The comonoid on `[u/u]` from Spivak/Garner/Fairbanks **Lemma 8.7**:
+the comonad structure on the left Kan extension of `u` along itself,
+viewed as a category, is a skeleton of `Fin^op`.
+
+Important: the comonoid's **carrier is `[u/u]`, NOT `u`**. The user-
+facing name `comonoid_from_list_polynomial` is preserved from the v0.6
+PR ask, but the actual carrier is the coclosure (Prop 2.16). With the
+v0.5.1 carrier shape `direction_at(u, N) == FinPolySet(1:N)` there is
+no comonoid on `u` directly (eraser undefined at N=0) — Lemma 8.7's
+construction sidesteps this entirely by working on `[u/u]`, where
+`[u/u][0]` is a singleton (the empty function) and the eraser at every
+position is well-defined.
+
+# Truncation requirement (v0.6.1)
+
+`u` must be a **finite truncation** built via
+`list_polynomial(max_size=K)`. The unbounded form
+`list_polynomial()` (positions `NatSet()`) raises an error: the
+`coclosure(u, u)` operation is FinPolySet-only in v0.6.1; v0.7's
+symbolic-positions pass will lift the restriction.
+
+For `u = list_polynomial(max_size=K)`, the resulting comonoid presents
+Fin^op restricted to objects `{0, 1, ..., K}` — every Fin^op morphism
+`N → N'` with both `N, N' ≤ K` is a direction in the comonoid's
+carrier.
+
+# Aliases
+
+`comonoid_from_list_polynomial(list_polynomial(max_size=K))` is exactly
+`comonoid_from_coclosure(list_polynomial(max_size=K))`. The
+`comonoid_from_list_polynomial` name is the user-facing convenience; the
+underlying machinery is [`comonoid_from_coclosure`](@ref).
+
+# Example
+
+```julia
+u_3 = list_polynomial(max_size=3)
+c_fin_op_3 = comonoid_from_list_polynomial(u_3)
+@assert validate_comonoid(c_fin_op_3)
+# Positions = {0, 1, 2, 3}; morphism count = Σ_N (1 + N + N² + N³).
+# Identity at 1 = (1, Dict(1=>1)). Identity at 0 = (0, Dict()).
+```
+
+See also: [`coclosure`](@ref), [`comonoid_from_coclosure`](@ref),
+[`list_polynomial`](@ref).
+"""
+function comonoid_from_list_polynomial(u::AbstractPolynomial)
+    pp = positions(u)
+    pp isa FinPolySet ||
+        error("comonoid_from_list_polynomial: u.positions is " *
+              "$(typeof(pp)); v0.6.1 requires a finite truncation built " *
+              "via `list_polynomial(max_size=K)`. The unbounded " *
+              "list_polynomial() (NatSet positions) ships when v0.7's " *
+              "symbolic-positions pass extends `coclosure` to non-finite " *
+              "carriers.")
+
+    # Defensive: confirm the shape matches list_polynomial — direction
+    # at N should be FinPolySet(1:N) for every N ∈ pp. We don't enforce
+    # this strictly (any p with FinPolySet positions and FinPolySet
+    # directions can use comonoid_from_coclosure directly), but the
+    # docstring promises Fin^op semantics, so a soft check helps callers
+    # who pass the wrong polynomial.
+    for N in pp.elements
+        DN = direction_at(u, N)
+        DN isa FinPolySet ||
+            error("comonoid_from_list_polynomial: u[$N] is $(typeof(DN)); " *
+                  "v0.6.1 requires FinPolySet at every position.")
+    end
+
+    # Concretize u into a Polynomial if it's a lazy variant (LazySubst
+    # etc.); coclosure dispatches on Polynomial.
+    u_concrete = u isa Polynomial ? u : materialize(u)
+    comonoid_from_coclosure(u_concrete)
+end

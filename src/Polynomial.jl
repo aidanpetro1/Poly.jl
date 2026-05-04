@@ -143,6 +143,30 @@ is_representable(p::Polynomial) = cardinality(p.positions) == Finite(1)
 "True iff every direction-set of `p` has the same cardinality (`p ≅ Iy^A`)."
 is_monomial(p::Polynomial) = _all_directions_equal(p)
 
+"""
+    is_reflexive(p::Polynomial) -> Bool
+
+True iff `p` is a **reflexive** object in the sense of
+Spivak/Garner/Fairbanks **Example 7.2** (in *Functorial Aggregation*,
+arXiv 2111.10968v7): the unit map of the weak-duality adjunction
+`η : p → p^∨∨ = [[p, y], y]` is invertible.
+
+Per Example 7.2 (Eq. 67), this holds iff `p(1)` is a singleton **or**
+every `p[i]` is a singleton — equivalently, `is_representable(p) ||
+is_linear(p)`. So `y^A` (representable) and `Ay` (linear) are
+reflexive, and weak duality `(–)^∨` swaps them via `(Ay)^∨ ≅ y^A` and
+`(y^A)^∨ ≅ Ay`.
+
+The reflexive subcategory is exactly where [`weak_dual`](@ref) is a
+contravariant autoequivalence — `weak_dual(weak_dual(p)) ≅ p` holds on
+reflexive `p` and fails in general (notably on `constant(I)` for
+non-empty I).
+
+See also: [`weak_dual`](@ref), [`is_representable`](@ref),
+[`is_linear`](@ref).
+"""
+is_reflexive(p::Polynomial) = is_representable(p) || is_linear(p)
+
 # Equality and hashing -----------------------------------------------
 
 """
@@ -155,12 +179,23 @@ For the up-to-iso predicate, see [`is_iso`](@ref) and [`is_iso_strict`](@ref).
 Errors when position-sets are non-finite (we can't iterate to check).
 """
 function ==(p::Polynomial, q::Polynomial)
+    # Identity fast-path: the same object is trivially equal to itself.
+    # This is load-bearing for lens / comodule constructors that compare
+    # coaction.dom == carrier when both are literally the same Polynomial
+    # (the lazy-bicomodule path in v0.4 relies on this).
+    p === q && return true
     p.positions == q.positions || return false
     pos = p.positions
     if pos isa FinPolySet
         return all(i -> direction_at(p, i) == direction_at(q, i), pos)
     end
-    error("Polynomial == is undecidable for non-finite position-sets; got $(typeof(pos)).")
+    # Non-finite positions: full equality is undecidable in general. Fall
+    # back to identity-via-`===` on the direction-at functions. This is
+    # a sound under-approximation: we may report two structurally-equal
+    # lazy Polynomials as unequal, but never the converse. Construction
+    # paths that rely on `coaction.dom == carrier` use the same object
+    # on both sides and pass via the `p === q` fast-path above.
+    return p.direction_at === q.direction_at
 end
 
 function hash(p::Polynomial, h::UInt)

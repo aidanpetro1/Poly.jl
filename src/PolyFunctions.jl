@@ -91,12 +91,31 @@ function ==(a::PolyFunction, b::PolyFunction)
     a.cod == b.cod || return false
     a.f === b.f && return true
     ca = cardinality(a.dom)
-    if ca isa Finite && ca.n ≤ TABULATE_SIZE_CAP[] && a.dom isa FinPolySet
-        return all(x -> a.f(x) == b.f(x), a.dom)
+    if ca isa Finite && ca.n ≤ TABULATE_SIZE_CAP[]
+        if a.dom isa FinPolySet
+            return all(x -> a.f(x) == b.f(x), a.dom)
+        end
+        # `a.dom` may be a lazy variant of a finite-cardinality position-set
+        # (e.g. `SubstPolySet` after the v0.4.x `Lens.dom` widening). Iterate
+        # by materializing once. Cost is `Σ_i |q.positions|^|p[i]|` jbar
+        # construction — the same a fully-eager pre-widening Lens would have
+        # paid; only fires when extensional `PolyFunction ==` is requested
+        # against a lazy dom.
+        elts = _materialize_polyset_elements(a.dom)
+        elts === nothing && error(
+            "Cannot iterate PolyFunction.dom of type $(typeof(a.dom)); " *
+            "add a `_materialize_polyset_elements` method.")
+        return all(x -> a.f(x) == b.f(x), elts)
     end
     error("Cannot decide PolyFunction equality: domain not finite, or above TABULATE_SIZE_CAP. " *
           "Tabulate or compare structurally.")
 end
+
+# Hook for iterating non-`FinPolySet` finite-cardinality position-sets in
+# extensional `PolyFunction ==`. Returns `nothing` if no materialization
+# strategy is known. The `SubstPolySet` method is added in `Monoidal.jl`
+# (forward-reference issue at file-include time).
+_materialize_polyset_elements(::PolySet) = nothing
 
 function show(io::IO, pf::PolyFunction)
     print(io, "PolyFunction(")

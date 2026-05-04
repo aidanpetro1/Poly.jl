@@ -43,6 +43,14 @@ function is_state_system(p::Polynomial)
     cardinality(p.positions) == cardinality(direction_at(p, first(p.positions)))
 end
 
+# Fallback for the widened `Lens.dom::AbstractPolynomial` (v0.4.x lazy
+# sweep). Lazy variants like `LazySubst` are never state systems by
+# construction (they're substitution polynomials, not monomials), so the
+# answer is unconditionally false. Dispatching here keeps callers like
+# `Coalgebra(::Lens)` from raising MethodError when handed a lens with a
+# non-concrete dom.
+is_state_system(::AbstractPolynomial) = false
+
 """
     moore_machine(S::PolySet, I::PolySet, A::PolySet, return_fn, update_fn) -> Lens
 

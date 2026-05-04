@@ -3,7 +3,27 @@
 # ============================================================
 
 """
-    Lens(dom::Polynomial, cod::AbstractPolynomial,
+    AbstractLens
+
+Supertype for all lens representations in this package. Subtypes must
+implement the lens interface: `dom`, `cod`, `on_positions`,
+`on_directions`, `is_deterministic`. The default subtype is [`Lens`](@ref);
+PolyMarkov.jl's `MarkovLens` is the canonical stochastic subtype. See
+`docs/dev/abstract_lens.md` for the extension contract.
+
+# Architectural note
+
+The supertype buys signature compatibility and a documented extension
+contract — not free implementations. Method bodies of `compose`,
+`parallel`, `subst`, `*`, `+`, `▷`, `⊙`, `back_directions`, `polybox`,
+`lift`, etc. stay typed `::Lens` for now. Subtypes (`MarkovLens` and
+any future variant) declare their own methods on their own type.
+Mixed-type calls require explicit conversion.
+"""
+abstract type AbstractLens end
+
+"""
+    Lens(dom::AbstractPolynomial, cod::AbstractPolynomial,
          on_positions::PolyFunction, on_directions::DependentFunction)
 
 A dependent lens `f : dom → cod` between two polynomials, characterized
@@ -15,23 +35,33 @@ A dependent lens `f : dom → cod` between two polynomials, characterized
 
 Lenses are the morphisms of the category **Poly**.
 
-`cod` is typed as `AbstractPolynomial` so that lazy variants
-([`LazySubst`](@ref)) can flow through the lens layer without forcing
-enumeration. The `dom` remains a [`Polynomial`](@ref) (concrete) because
-positions of `dom` are iterated frequently.
+Both `dom` and `cod` are typed as `AbstractPolynomial` so that lazy
+variants ([`LazySubst`](@ref)) can flow through the lens layer without
+forcing enumeration. `dom` was widened from `Polynomial` to
+`AbstractPolynomial` in the v0.4.x lazy-sweep series so that
+[`subst(::Lens, ::Lens)`](@ref) can build a lazy `new_dom` — the eager
+form materializes `Σ_i |q.positions|^|p[i]|` jbar dicts and hangs on
+PolyCDS-style fixtures with rich direction-sets.
 
-Access fields directly: `f.on_positions`, `f.on_directions`.
+Access fields directly: `f.on_positions`, `f.on_directions`. Code that
+previously used `f.dom.positions` should switch to `positions(f.dom)`,
+which dispatches correctly across `ConcretePolynomial` / `LazySubst`.
+
+Methods that genuinely need the dom enumerated (e.g. extensional
+`Lens ==`, `back_directions`, `(::Lens)(::PolySet)` natural-transformation
+apply) materialize on demand.
 """
-struct Lens
-    dom::Polynomial
+struct Lens <: AbstractLens
+    dom::AbstractPolynomial
     cod::AbstractPolynomial
     on_positions::PolyFunction
     on_directions::DependentFunction
-    function Lens(dom::Polynomial, cod::AbstractPolynomial,
+    function Lens(dom::AbstractPolynomial, cod::AbstractPolynomial,
                   on_pos::PolyFunction, on_dir::DependentFunction)
-        on_pos.dom == dom.positions || error("on_positions domain $(on_pos.dom) ≠ dom.positions $(dom.positions)")
+        dom_pos = positions(dom)
+        on_pos.dom == dom_pos || error("on_positions domain $(on_pos.dom) ≠ dom.positions $(dom_pos)")
         on_pos.cod == positions(cod) || error("on_positions codomain $(on_pos.cod) ≠ cod.positions $(positions(cod))")
-        on_dir.dom == dom.positions || error("on_directions domain $(on_dir.dom) ≠ dom.positions $(dom.positions)")
+        on_dir.dom == dom_pos || error("on_directions domain $(on_dir.dom) ≠ dom.positions $(dom_pos)")
         new(dom, cod, on_pos, on_dir)
     end
 end
@@ -44,11 +74,12 @@ Convenience constructor.
 - `on_dir_fn(i, b)` returns a `dom[i]`-direction for each `i ∈ dom(1)` and
   `b ∈ cod[on_pos_fn(i)]`.
 """
-function Lens(dom::Polynomial, cod::AbstractPolynomial, on_pos_fn::Function, on_dir_fn::Function)
+function Lens(dom::AbstractPolynomial, cod::AbstractPolynomial, on_pos_fn::Function, on_dir_fn::Function)
+    dom_pos = positions(dom)
     cod_pos = positions(cod)
-    on_pos = PolyFunction(dom.positions, cod_pos, on_pos_fn)
+    on_pos = PolyFunction(dom_pos, cod_pos, on_pos_fn)
     on_dir = DependentFunction(
-        dom.positions,
+        dom_pos,
         i -> ExpSet(direction_at(dom, i), direction_at(cod, on_pos_fn(i))),
         i -> PolyFunction(direction_at(cod, on_pos_fn(i)),
                           direction_at(dom, i),
@@ -56,6 +87,54 @@ function Lens(dom::Polynomial, cod::AbstractPolynomial, on_pos_fn::Function, on_
     )
     Lens(dom, cod, on_pos, on_dir)
 end
+
+# ============================================================
+# AbstractLens interface — accessor functions
+# ============================================================
+# Additive on top of direct field access. Existing code using
+# `f.on_positions` etc. continues to work; subtypes implement the
+# accessors to participate in the AbstractLens contract.
+
+"""
+    dom(L::AbstractLens) -> AbstractPolynomial
+
+Domain polynomial. For `::Lens`, returns `L.dom`.
+"""
+dom(L::Lens) = L.dom
+
+"""
+    cod(L::AbstractLens) -> AbstractPolynomial
+
+Codomain polynomial. For `::Lens`, returns `L.cod`.
+"""
+cod(L::Lens) = L.cod
+
+"""
+    on_positions(L::AbstractLens)
+
+Forward action `f₁ : dom(1) → cod(1)`. For `::Lens`, returns the
+`PolyFunction` field `L.on_positions`.
+"""
+on_positions(L::Lens) = L.on_positions
+
+"""
+    on_directions(L::AbstractLens)
+
+Back-action `f♯`. For `::Lens`, returns the `DependentFunction` field
+`L.on_directions` whose body is a `PolyFunction` per dom-position.
+Stochastic subtypes return a representation whose body produces a
+distribution.
+"""
+on_directions(L::Lens) = L.on_directions
+
+"""
+    is_deterministic(L::AbstractLens)::Bool
+
+`true` iff the back-action is on-the-nose deterministic. Trivially
+`true` for `Lens`. PolyMarkov.jl's `MarkovLens` overrides to inspect
+whether each back-direction distribution is a point mass.
+"""
+is_deterministic(::Lens) = true
 
 # Identity ----------------------------------------------------------
 
@@ -90,11 +169,12 @@ Per Niu & Spivak Exercise 3.49 / Proposition 3.50.
 function compose(f::Lens, g::Lens)
     _struct_equal(f.cod, g.dom) || error("Cannot compose: cod(f) = $(f.cod) ≠ dom(g) = $(g.dom)")
     p, _, r = f.dom, f.cod, g.cod
+    p_pos = positions(p)
 
     h_on_pos_fn = i -> g.on_positions.f(f.on_positions.f(i))
 
     h_on_dir = DependentFunction(
-        p.positions,
+        p_pos,
         i -> ExpSet(direction_at(p, i), direction_at(r, h_on_pos_fn(i))),
         i -> begin
             j = f.on_positions.f(i)
@@ -106,11 +186,11 @@ function compose(f::Lens, g::Lens)
         end
     )
 
-    # Use the `positions` accessor on `r` rather than `r.positions`: when
-    # `g.cod` is a lazy variant (e.g. `LazySubst`) the field doesn't exist;
-    # the accessor is the `AbstractPolynomial` interface contract.
+    # Use the `positions` accessor on both `p` and `r` rather than `.positions`:
+    # both may be lazy variants (e.g. `LazySubst`) where the field doesn't
+    # exist; the accessor is the `AbstractPolynomial` interface contract.
     Lens(p, r,
-         PolyFunction(p.positions, positions(r), h_on_pos_fn),
+         PolyFunction(p_pos, positions(r), h_on_pos_fn),
          h_on_dir)
 end
 
@@ -126,12 +206,29 @@ on-positions functions are extensionally equal, and (c) their on-directions
 functions agree at every position.
 """
 function ==(f::Lens, g::Lens)
-    f.dom == g.dom || return false
+    _struct_equal(f.dom, g.dom) || return false
     _struct_equal(f.cod, g.cod) || return false
     f.on_positions == g.on_positions || return false
-    p = f.dom
-    p.positions isa FinPolySet || error("Lens equality requires a FinPolySet position-set.")
-    for i in p.positions
+    # Iterate the dom positions extensionally. After the v0.4.x widening,
+    # `f.dom` may be a `LazySubst`; `positions(...)` returns its
+    # `SubstPolySet`, which doesn't expose `.elements` directly. Materialize
+    # only when extensional iteration is requested — `Lens ==` is the
+    # rare site that actually needs every position.
+    p_pos = positions(f.dom)
+    if !(p_pos isa FinPolySet)
+        # Lazy dom (e.g. `LazySubst`, `LazyBicomoduleCarrier`) — materialize
+        # the dom once for iteration. Cheap callers should compare
+        # structurally instead. `materialize` is defined for each lazy
+        # variant in its respective file (Monoidal.jl, Cofree.jl); this
+        # path errors out for any AbstractPolynomial that doesn't have a
+        # `materialize` method.
+        f.dom isa ConcretePolynomial &&
+            error("Lens equality: positions($(typeof(f.dom))) returned non-FinPolySet — bad ConcretePolynomial?")
+        p_pos = positions(materialize(f.dom))
+        p_pos isa FinPolySet ||
+            error("Lens equality: materialize($(typeof(f.dom))) didn't yield FinPolySet positions; got $(typeof(p_pos))")
+    end
+    for i in p_pos.elements
         fi = f.on_directions.f(i)::PolyFunction
         gi = g.on_directions.f(i)::PolyFunction
         fi == gi || return false
@@ -150,12 +247,13 @@ transformation (Niu & Spivak Proposition 3.44):
     (i, g : dom[i] → X)  ↦  (f₁ i, f♯_i ⨟ g : cod[f₁ i] → X)
 """
 function (f::Lens)(X::PolySet)
-    domX = f.dom(X)
-    # The cod may be a lazy variant (e.g. LazySubst); materialize-on-demand
-    # for the apply path. Lens-as-natural-transformation is rarely on the hot
-    # path of bicomodule construction, so paying the materialization cost
-    # only when this method is actually called is acceptable.
+    # Both `dom` and `cod` may be lazy variants (e.g. `LazySubst`);
+    # materialize-on-demand for the apply path. Lens-as-natural-transformation
+    # is rarely on the hot path of bicomodule construction, so paying the
+    # materialization cost only when this method is actually called is acceptable.
+    dom_concrete = f.dom isa ConcretePolynomial ? f.dom : materialize(f.dom)
     cod_concrete = f.cod isa ConcretePolynomial ? f.cod : materialize(f.cod)
+    domX = dom_concrete(X)
     codX = cod_concrete(X)
     PolyFunction(domX, codX, ig -> begin
         (i, g) = ig
@@ -315,7 +413,7 @@ function back_directions(L::Lens; materialize::Union{Bool,Symbol}=:auto)
 
     materialize === false && return callable
 
-    dom_pos = L.dom.positions
+    dom_pos = positions(L.dom)
     if !(dom_pos isa FinPolySet)
         materialize === true &&
             throw(ArgumentError("back_directions: cannot materialize a Lens whose domain positions are non-finite (got $(typeof(dom_pos)))"))

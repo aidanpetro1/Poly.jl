@@ -289,7 +289,16 @@ function cofree_comonoid(p::Polynomial, depth::Int)
         return (π_a..., π_b...)
     end
 
-    duplicator = Lens(carrier, subst(carrier, carrier),
+    # Use `subst_lazy` here, not eager `subst`. The eager form materializes
+    # `Σ_t |q(1)|^|t-paths|` positions, which for representable carriers
+    # like `y^X` blows up at depth 2: cofree(y^{a,b,c}, 2) has a depth-2
+    # tree with 13 paths, q.positions = 3, so 3^13 ≈ 1.59M jbar-dicts get
+    # built just to construct the duplicator's codomain — pure waste,
+    # since the codomain is only consumed via shape-checks (`is_subst_of`)
+    # which short-circuit on `LazySubst`. The duplicator's on-positions /
+    # on-directions closures are unchanged. (v0.4 perf fix; surfaced
+    # by the v0.4.x #5 bundle's cofree_morphism tests.)
+    duplicator = Lens(carrier, subst_lazy(carrier, carrier),
                       dup_on_pos, dup_on_dir)
 
     Comonoid(carrier, eraser, duplicator)
@@ -394,8 +403,12 @@ function validate_right_comodule_detailed(M::RightComodule; verbose::Union{Bool,
     c = M.base.carrier
     λ = M.coaction
     pp = X.positions
-    pp isa FinPolySet ||
-        error("validate_right_comodule requires finite X.positions")
+    # Accept either FinPolySet or a lazy streaming PolySet (v0.4: the
+    # truly-lazy `BicomoduleComposePosSet` from `compose_lazy`).
+    (pp isa FinPolySet || pp isa BicomoduleComposePosSet) ||
+        error("validate_right_comodule requires finite or lazy-streamable X.positions; " *
+              "got $(typeof(pp))")
+    pos_iter = _iter_positions(pp)
 
     failures = ValidationFailure[]
     collect_all = (verbose === :all)
@@ -405,9 +418,9 @@ function validate_right_comodule_detailed(M::RightComodule; verbose::Union{Bool,
         return collect_all
     end
 
+    # First pass: counit on positions + cache mbar_at.
     mbar_at = Dict()
-    id_in_c = Dict()
-    for x in pp.elements
+    for x in pos_iter
         x′, mbar = λ.on_positions.f(x)
         if x′ != x
             failure = ValidationFailure(
@@ -419,12 +432,13 @@ function validate_right_comodule_detailed(M::RightComodule; verbose::Union{Bool,
         end
         mbar_at[x] = mbar
     end
+    id_in_c = Dict()
     for j in c.positions.elements
         id_in_c[j] = M.base.eraser.on_directions.f(j).f(:pt)
     end
 
     # Law 2: counit on directions.
-    for x in pp.elements
+    for x in pos_iter
         Dx = direction_at(X, x)::FinPolySet
         for a in Dx.elements
             j = mbar_at[x][a]
@@ -442,7 +456,7 @@ function validate_right_comodule_detailed(M::RightComodule; verbose::Union{Bool,
     end
 
     # Law 3: coassoc.
-    for x in pp.elements
+    for x in pos_iter
         Dx = direction_at(X, x)::FinPolySet
         mbar_x = mbar_at[x]
         for a in Dx.elements
@@ -608,6 +622,331 @@ function cofree_universal(c::Comonoid, labeling::Lens, depth::Int)
 end
 
 # ============================================================
+# cofree_morphism — 2-functoriality of cofree (v0.4.x #5 part 3)
+# ============================================================
+#
+# Given L : p → q (a polynomial morphism = Lens), build the induced
+# Retrofunctor cofree(p, depth) → cofree(q, depth). This is the witness
+# that cofree is a functor Poly → Comon (in fact a right adjoint).
+#
+# Distinct from `cofree_universal`, which solves a different universal-
+# property problem (factor a labeling lens out of a comonoid c through
+# T_p). `cofree_morphism` is the *functorial action* on morphisms.
+#
+# Strict-mode guarantee: by categorical content, the result strictly
+# validates as a Retrofunctor (counit + comult preservation hold as
+# strict lens equations, not just element-wise). PolyCDS's deep-
+# modularity refactor wants this to derive a strictly-coherent
+# alphabet-inclusion Retrofunctor from per-disease alphabet inclusions
+# rather than hand-rolling and accepting only element-wise validation.
+
+# Internal: walk a p-tree through L and produce the corresponding q-tree.
+# At each level: relabel via L.on_positions; for each q-direction at the
+# new label, lift to a p-direction via L.on_directions and recurse into
+# the appropriate child.
+function _cofree_morphism_walk(L::Lens, t::BehaviorTree)
+    new_label = L.on_positions.f(t.label)
+    if isempty(t.children)
+        # Input is a stub (depth-0 fragment); output is a stub at the new label.
+        return BehaviorTree(new_label, Dict{Any,BehaviorTree}())
+    end
+    L_back = L.on_directions.f(t.label)::PolyFunction   # q.dirs[L(t.label)] → p.dirs[t.label]
+    Dq_at_new = direction_at(L.cod, new_label)::FinPolySet
+    new_children = Dict{Any,BehaviorTree}()
+    for b_q in Dq_at_new.elements
+        a_p = L_back.f(b_q)
+        haskey(t.children, a_p) ||
+            error("cofree_morphism: tree at p-label $(t.label) lacks child for " *
+                  "p-direction $a_p (lifted from q-direction $b_q via L.on_directions)")
+        new_children[b_q] = _cofree_morphism_walk(L, t.children[a_p])
+    end
+    BehaviorTree(new_label, new_children)
+end
+
+# Internal: lift a q-path π_q in the walked q-tree back to a p-path π_p
+# in the original p-tree. Walks both trees in lockstep, using L's
+# back-action on each step.
+function _cofree_morphism_lift_path(L::Lens, t::BehaviorTree, π_q)
+    isempty(π_q) && return ()
+    b_q = π_q[1]
+    rest_q = π_q[2:end]
+    L_back = L.on_directions.f(t.label)::PolyFunction
+    a_p = L_back.f(b_q)
+    haskey(t.children, a_p) ||
+        error("cofree_morphism: path lift at p-label $(t.label) — no child for " *
+              "p-direction $a_p (lifted from q-direction $b_q)")
+    sub = t.children[a_p]
+    rest_p = _cofree_morphism_lift_path(L, sub, rest_q)
+    return (a_p, rest_p...)
+end
+
+# Internal (v0.4.x forward-direction patch): the canonical forward action
+# of `cofree_morphism(L)`. Given a p-tree `t` and a p-tree-path `π_p`,
+# produce the q-tree-path that's the "filter-subsequence" of π_p along L:
+# at each step `a_p`, look up whether some q-direction at the current
+# q-label maps via `L.on_directions` to `a_p`. If yes, append that
+# q-direction to the output and advance both the p-tree (via `a_p`) and
+# the q-position (via `L.on_positions` of the new p-label). If no, skip
+# this step in the q-path (the q-path gets shorter) but still advance
+# the p-tree so we can continue. The result is always a valid q-path in
+# F(t) because every appended q-direction is in `direction_at(L.cod,
+# cur_q_label)` at the time it's appended, and the q-children at that
+# direction exist in F(t) by the cofree_morphism walk's construction.
+#
+# Total on every dom-direction (= p-tree-path in t). Image is a proper
+# subset of the cod-directions when L's back-action is non-surjective,
+# which is exactly the partial-image case the v0.4.x patch targets.
+function _cofree_morphism_forward_path(L::Lens, t::BehaviorTree, π_p)
+    out = ()
+    cur_t = t
+    cur_q_label = L.on_positions.f(cur_t.label)
+    for a_p in π_p
+        L_back = L.on_directions.f(cur_t.label)::PolyFunction
+        Dq_at = direction_at(L.cod, cur_q_label)::FinPolySet
+        b_q_found = nothing
+        for b_q in Dq_at.elements
+            if L_back.f(b_q) == a_p
+                b_q_found = b_q
+                break
+            end
+        end
+        haskey(cur_t.children, a_p) ||
+            error("cofree_morphism forward: no child for p-direction $a_p at " *
+                  "p-label $(cur_t.label)")
+        if b_q_found !== nothing
+            out = (out..., b_q_found)
+            cur_t = cur_t.children[a_p]
+            cur_q_label = L.on_positions.f(cur_t.label)
+        else
+            # `a_p` is not in the image of L.on_directions at cur_q_label —
+            # skip in the q-path. Advance cur_t (so subsequent steps have
+            # the right local L_back), but leave cur_q_label unchanged
+            # since the q-walk hasn't taken a step.
+            cur_t = cur_t.children[a_p]
+        end
+    end
+    out
+end
+
+"""
+    cofree_morphism(L::Lens, depth::Int) -> Retrofunctor
+
+Functorial action of cofree on polynomial morphisms. Given `L : p → q`,
+returns the induced retrofunctor
+[`cofree_comonoid`](@ref)`(p, depth) → cofree_comonoid(q, depth)`.
+
+This is the witness that cofree is a functor (in fact a right adjoint,
+hence covariant on morphisms). Distinct from [`cofree_universal`](@ref),
+which factors a labeling lens out of a comonoid through `T_p` —
+`cofree_morphism` is the bare functorial action.
+
+# Construction (informal)
+
+  - On positions: a behavior tree `t` over `p` is sent to the behavior
+    tree `t'` over `q` whose root label is `L.on_positions(t.label)` and
+    whose children at each `q`-direction `b_q` are obtained by walking
+    via `L.on_directions(t.label).f(b_q)` to find the corresponding
+    `p`-direction and recursing.
+  - On directions: a tree-path `π_q` in `t'` (sequence of `q`-directions)
+    is lifted to a tree-path `π_p` in `t` by `L.on_directions` applied
+    pointwise along the walk.
+
+# Strict validation
+
+The result strict-validates: `validate_retrofunctor(F; strict=true)`
+passes for any `L`. This is a categorical guarantee — strict-mode
+failure indicates a bug in this function.
+
+The truncated-cofree caveat that affects `cofree_universal` (where the
+strict comonoid-morphism laws fail because a `c`-walk of length `k`
+lands on a depth-`(d-k)` tree but `c.duplicator ⨟ (F ▷ F)` lands on
+depth-`d`) does **not** apply here: the morphism `cofree_morphism(L)`
+walks two cofrees in lockstep at the same depth, so the laws line up
+exactly.
+
+# Example
+
+```julia
+# Alphabet inclusion {:a, :c} ⊆ {:a, :b, :c} as a Lens between
+# representable polynomials y^Σ.
+Σ_full = FinPolySet([:a, :b, :c])
+Σ_part = FinPolySet([:a, :c])
+L = Lens(representable(Σ_full), representable(Σ_part),
+         _ -> :pt,                   # trivial on positions
+         (_, σ_p) -> σ_p)            # back-action: include partial directions
+filter_L = cofree_morphism(L, 3)
+# filter_L : cofree(y^Σ_full, 3) → cofree(y^Σ_part, 3) as a Retrofunctor
+@test validate_retrofunctor(filter_L; strict=true)
+```
+"""
+function cofree_morphism(L::Lens, depth::Int)
+    depth ≥ 0 ||
+        throw(ArgumentError("cofree_morphism: depth must be ≥ 0; got $depth"))
+    p = L.dom
+    q = L.cod
+    p_concrete = p isa ConcretePolynomial ? p : materialize(p)
+    q_concrete = q isa ConcretePolynomial ? q : materialize(q)
+    p_concrete.positions isa FinPolySet ||
+        error("cofree_morphism: L.dom must have FinPolySet positions")
+    q_concrete.positions isa FinPolySet ||
+        error("cofree_morphism: L.cod must have FinPolySet positions")
+
+    cofree_p = cofree_comonoid(p_concrete, depth)
+    cofree_q = cofree_comonoid(q_concrete, depth)
+
+    F_on_pos = t -> _cofree_morphism_walk(L, t)
+    F_on_dir = (t, π_q) -> _cofree_morphism_lift_path(L, t, π_q)
+
+    underlying = Lens(cofree_p.carrier, cofree_q.carrier, F_on_pos, F_on_dir)
+
+    # Forward-direction action (v0.4.x patch). Filter-subsequence of a
+    # p-path: each step that's in the image of L.on_directions is mapped
+    # to the corresponding q-direction; out-of-image steps are dropped.
+    # Total on every p-tree-path; image at a tensored cod is a proper
+    # subset when L's back-action is non-surjective. Used by
+    # `base_change_left` / `base_change_right` to handle partial-image
+    # retrofunctors that the back-action-inversion path can't.
+    #
+    # API: F.forward_on_directions(t).f(π_p) returns the q-tree-path,
+    # mirroring the back-action's `.on_directions.f(t).f(π_q)` shape.
+    F_forward = t -> (; f = π_p -> _cofree_morphism_forward_path(L, t, π_p))
+
+    Retrofunctor(cofree_p, cofree_q, underlying;
+                 forward_on_directions = F_forward)
+end
+
+# ============================================================
+# Cofree comonoid on a comonoid (v0.4 #4)
+# ============================================================
+#
+# `cofree_comonoid(c::Comonoid, depth)` packages the depth-bounded
+# cofree-on-polynomial `T_(c.carrier)` together with the canonical
+# counit retrofunctor `T_(c.carrier) ⇒ c`. This is the cofree-on-a-
+# comonoid construction at the level of comonoids / retrofunctors,
+# distinct from the v0.3 cofree-on-a-polynomial.
+#
+# Universal property (element-wise per Q4.2): for any retrofunctor
+# `α : D ⇒ c`, `factor_through(coc, α)` returns the unique
+# retrofunctor `β : D ⇒ coc.cofree` whose composition with the counit
+# equals `α` element-wise. Strict-Lens uniqueness fails for the
+# truncated case (same caveat as `cofree_universal`).
+#
+# See `docs/dev/cofree_over_comonoid.md` for the design note.
+
+"""
+    CofreeOverComonoid
+
+Result of [`cofree_comonoid(::Comonoid, ::Int)`](@ref). Carries:
+
+  - `base::Comonoid` — the comonoid being lifted to its cofree.
+  - `depth::Int` — truncation depth.
+  - `cofree::Comonoid` — the depth-bounded cofree comonoid on
+    `base.carrier` (= `cofree_comonoid(base.carrier, depth)`).
+  - `counit::Retrofunctor` — the universal counit `cofree ⇒ base`,
+    underlying lens equal to [`cofree_unit`](@ref)`(base.carrier, depth)`.
+
+Use [`factor_through`](@ref) to exhibit the universal property.
+"""
+struct CofreeOverComonoid
+    base::Comonoid
+    depth::Int
+    cofree::Comonoid
+    counit::Retrofunctor
+end
+
+function show(io::IO, coc::CofreeOverComonoid)
+    print(io, "CofreeOverComonoid(depth=", coc.depth, ", base=")
+    show(io, coc.base.carrier)
+    print(io, ")")
+end
+
+"""
+    cofree_comonoid(c::Comonoid, depth::Int) -> CofreeOverComonoid
+
+The depth-`depth` cofree comonoid on a *comonoid* `c`. Distinct from
+[`cofree_comonoid(::Polynomial, ::Int)`](@ref), which is the cofree on
+the underlying polynomial.
+
+Operationally this packages `Tp = cofree_comonoid(c.carrier, depth)`
+with a counit `Retrofunctor : Tp ⇒ c` whose underlying lens is
+[`cofree_unit`](@ref)`(c.carrier, depth)`.
+
+# Universal property (element-wise)
+
+For any retrofunctor `α : D ⇒ c`,
+[`factor_through(coc, α)`](@ref factor_through) returns the unique
+retrofunctor `β : D ⇒ coc.cofree` such that
+`compose(β.underlying, coc.counit.underlying) ≡ α.underlying`
+element-wise on positions and directions.
+
+Like [`cofree_universal`](@ref), strict comonoid-morphism laws fail
+on truncated cases — the element-wise universal property is the
+substantive content. See `docs/dev/cofree_over_comonoid.md` for
+design rationale.
+
+# Constraints
+
+- `c.carrier.positions isa FinPolySet` (truncation requires
+  enumeration of base positions).
+- `depth ≥ 1` (the counit requires at least one tree level to be
+  meaningful; depth-0 collapses to a degenerate case).
+"""
+function cofree_comonoid(c::Comonoid, depth::Int)
+    depth ≥ 1 ||
+        throw(ArgumentError("cofree_comonoid(::Comonoid, depth): depth must be ≥ 1; got $depth"))
+    c.carrier.positions isa FinPolySet ||
+        error("cofree_comonoid(::Comonoid, depth): requires c.carrier.positions to be a FinPolySet")
+
+    # Compute Tp once and reuse — `cofree_unit(c.carrier, depth)` would
+    # otherwise re-run `cofree_comonoid(c.carrier, depth)` internally,
+    # doubling the tree-enumeration cost (which is the dominant factor
+    # at any non-trivial depth/cardinality).
+    Tp = cofree_comonoid(c.carrier, depth)
+    counit_on_pos = t -> t.label
+    counit_on_dir = (_t, a) -> (a,)
+    counit_lens = Lens(Tp.carrier, c.carrier, counit_on_pos, counit_on_dir)
+    counit = Retrofunctor(Tp, c, counit_lens)
+    CofreeOverComonoid(c, depth, Tp, counit)
+end
+
+"""
+    factor_through(coc::CofreeOverComonoid, α::Retrofunctor;
+                   strict::Bool=false) -> Retrofunctor
+
+The unique retrofunctor `β : α.dom ⇒ coc.cofree` whose composition with
+`coc.counit` equals `α` element-wise (Q4.2: element-wise is the default
+per the design sketch). Delegates to [`cofree_universal`](@ref) on the
+underlying labeling lens.
+
+When `strict=true`, run the round-trip check
+`compose(β.underlying, coc.counit.underlying) == α.underlying` and
+error on mismatch. The strict mode usually fails on truncated cases —
+prefer the default `strict=false`.
+
+# Errors
+
+- `α.cod !== coc.base` — `α` must terminate at the base of the cofree.
+"""
+function factor_through(coc::CofreeOverComonoid, α::Retrofunctor;
+                        strict::Bool=false)
+    α.cod === coc.base ||
+        error("factor_through(::CofreeOverComonoid, ::Retrofunctor): " *
+              "α.cod must be coc.base (got $(α.cod) vs $(coc.base))")
+    β = cofree_universal(α.dom, α.underlying, coc.depth)
+
+    if strict
+        composed = compose(β.underlying, coc.counit.underlying)
+        composed == α.underlying ||
+            error("factor_through(::CofreeOverComonoid, ::Retrofunctor; strict=true): " *
+                  "round-trip Lens equality fails. Strict-Lens uniqueness typically " *
+                  "fails on truncated cofrees; use strict=false (default) for the " *
+                  "element-wise universal property.")
+    end
+
+    β
+end
+
+# ============================================================
 # ============================================================
 # Left comodules
 # ============================================================
@@ -696,8 +1035,11 @@ function validate_left_comodule_detailed(M::LeftComodule; verbose::Union{Bool,Sy
     c = M.base.carrier
     λ = M.coaction
     pp = X.positions
-    pp isa FinPolySet ||
-        error("validate_left_comodule requires finite carrier positions")
+    # Accept either FinPolySet or a lazy streaming PolySet (v0.4).
+    (pp isa FinPolySet || pp isa BicomoduleComposePosSet) ||
+        error("validate_left_comodule requires finite or lazy-streamable carrier positions; " *
+              "got $(typeof(pp))")
+    pos_iter = _iter_positions(pp)
 
     failures = ValidationFailure[]
     collect_all = (verbose === :all)
@@ -710,7 +1052,7 @@ function validate_left_comodule_detailed(M::LeftComodule; verbose::Union{Bool,Sy
     i_at    = Dict()
     mbar_at = Dict()
     id_in_c = Dict()
-    for x in pp.elements
+    for x in pos_iter
         i, mbar = λ.on_positions.f(x)
         i_at[x] = i
         mbar_at[x] = mbar
@@ -720,7 +1062,7 @@ function validate_left_comodule_detailed(M::LeftComodule; verbose::Union{Bool,Sy
     end
 
     # Law 1: first-component / counit on positions
-    for x in pp.elements
+    for x in pos_iter
         i = i_at[x]
         id_i = id_in_c[i]
         if !haskey(mbar_at[x], id_i)
@@ -741,7 +1083,7 @@ function validate_left_comodule_detailed(M::LeftComodule; verbose::Union{Bool,Sy
     end
 
     # Law 2: counit on directions
-    for x in pp.elements
+    for x in pos_iter
         i = i_at[x]
         id_i = id_in_c[i]
         Dx = direction_at(X, x)::FinPolySet
@@ -759,7 +1101,7 @@ function validate_left_comodule_detailed(M::LeftComodule; verbose::Union{Bool,Sy
     end
 
     # Law 3: coassoc
-    for x in pp.elements
+    for x in pos_iter
         i = i_at[x]
         Di = direction_at(c, i)::FinPolySet
         for b1 in Di.elements
@@ -1068,47 +1410,57 @@ end
 """
     BicomoduleComposePosSet(M, N) <: PolySet
 
-Lazy position-set of `LazyBicomoduleCarrier(M, N)`. Cardinality is
-computed structurally; iteration / `.elements` materializes.
+Lazy position-set of `LazyBicomoduleCarrier(M, N)`. As of v0.4 this set is
+fully streaming: `cardinality` and `length` use the structural formula
+`Σ_x Π_a #compatible_y(a)` without enumerating; `Base.iterate` yields
+`(x, σ)` pairs one at a time without ever building the full vector. The
+v0.4 `compose_lazy` builds a `Polynomial` whose `.positions` is one of
+these — validators iterate via `_iter_positions(::PolySet)` and accept
+the streaming form.
 """
 struct BicomoduleComposePosSet <: PolySet
     M::Bicomodule
     N::Bicomodule
 end
 
-# Internal: enumerate (x, σ) positions of M ⊙_D N. σ is encoded as a
-# Dict X[x]-element → Y.positions-element. Returns a Vector{Tuple} for
-# inclusion in a FinPolySet.
-function _enumerate_compose_positions(M::Bicomodule, N::Bicomodule)
-    X = M.carrier
-    Y = N.carrier
-    Xp = X.positions
-    Yp = Y.positions
-    (Xp isa FinPolySet && Yp isa FinPolySet) ||
-        error("compose(::Bicomodule, ::Bicomodule): requires FinPolySet carriers; " *
-              "for symbolic carriers use compose_lazy")
-
-    # Pre-compute: for each D-position d, which Y-positions y have
-    # λ_L^N(y).first == d.
+# Internal: build the once-per-iteration index of "Y-positions grouped by
+# the D-position they route to via N's left coaction." Used by both the
+# streaming iterator and the eager enumerator.
+function _build_y_by_d(N::Bicomodule)
+    Yp = N.carrier.positions
+    Yp isa FinPolySet ||
+        error("compose(::Bicomodule, ::Bicomodule): requires FinPolySet on N.carrier.positions")
     y_by_d = Dict{Any,Vector{Any}}()
     for y in Yp.elements
         j_y, _ = N.left_coaction.on_positions.f(y)
         push!(get!(() -> Any[], y_by_d, j_y), y)
     end
+    y_by_d
+end
+
+# Internal: enumerate (x, σ) positions of M ⊙_D N. σ is encoded as a
+# Dict X[x]-element → Y.positions-element. Returns a Vector{Tuple} for
+# inclusion in a FinPolySet — used by the eager `compose`.
+function _enumerate_compose_positions(M::Bicomodule, N::Bicomodule)
+    X = M.carrier
+    Xp = X.positions
+    Xp isa FinPolySet ||
+        error("compose(::Bicomodule, ::Bicomodule): requires FinPolySet on M.carrier.positions; " *
+              "for symbolic carriers use compose_lazy")
+
+    y_by_d = _build_y_by_d(N)
 
     out = Tuple[]
     for x in Xp.elements
         _, mbar_R_x = M.right_coaction.on_positions.f(x)
         Dx = direction_at(X, x)::FinPolySet
         if isempty(Dx.elements)
-            # σ is the empty function; encode as empty Dict.
             push!(out, (x, Dict{Any,Any}()))
             continue
         end
-        # For each direction a, the candidates for σ(a) are y_by_d[mbar_R_x[a]].
         directions = collect(Dx.elements)
         cands_lists = [get(y_by_d, mbar_R_x[a], Any[]) for a in directions]
-        any(isempty, cands_lists) && continue   # no σ exists at this x
+        any(isempty, cands_lists) && continue
         for choice in Iterators.product(cands_lists...)
             σ = Dict{Any,Any}(zip(directions, choice))
             push!(out, (x, σ))
@@ -1117,7 +1469,93 @@ function _enumerate_compose_positions(M::Bicomodule, N::Bicomodule)
     out
 end
 
-cardinality(s::BicomoduleComposePosSet) = Finite(length(_enumerate_compose_positions(s.M, s.N)))
+# Internal: structural cardinality formula for M ⊙_D N. Counts positions
+# without materializing them: |Σ_x Π_a #compatible_y(a)|. If `M.carrier[x]`
+# is empty, that x contributes 1 (the empty σ). If any factor is 0
+# (no compatible y for some direction), x contributes 0.
+function _lazy_compose_length(M::Bicomodule, N::Bicomodule)
+    counts_by_d = Dict{Any,Int}()
+    for y in N.carrier.positions.elements
+        j_y, _ = N.left_coaction.on_positions.f(y)
+        counts_by_d[j_y] = get(counts_by_d, j_y, 0) + 1
+    end
+    total = 0
+    for x in M.carrier.positions.elements
+        _, mbar_R_x = M.right_coaction.on_positions.f(x)
+        Dx = direction_at(M.carrier, x)::FinPolySet
+        if isempty(Dx.elements)
+            total += 1
+            continue
+        end
+        prod = 1
+        all_nonzero = true
+        for a in Dx.elements
+            cnt = get(counts_by_d, mbar_R_x[a], 0)
+            if cnt == 0
+                all_nonzero = false
+                break
+            end
+            prod *= cnt
+        end
+        all_nonzero && (total += prod)
+    end
+    total
+end
+
+# Internal: build the streaming iterator for compose-positions. The
+# iterator yields `(x, σ)` pairs lazily; only the `y_by_d` index (size
+# |N.carrier.positions|) is materialized up front. All Cartesian-product
+# work is deferred via `Iterators.product`.
+function _compose_position_stream(s::BicomoduleComposePosSet)
+    M, N = s.M, s.N
+    X = M.carrier
+    Xp = X.positions
+    y_by_d = _build_y_by_d(N)
+
+    Iterators.flatten(
+        Iterators.map(Xp.elements) do x
+            _, mbar_R_x = M.right_coaction.on_positions.f(x)
+            Dx = direction_at(X, x)::FinPolySet
+            if isempty(Dx.elements)
+                return ((x, Dict{Any,Any}()),)
+            end
+            directions = collect(Dx.elements)
+            cands_lists = [get(y_by_d, mbar_R_x[a], Any[]) for a in directions]
+            if any(isempty, cands_lists)
+                return ()
+            end
+            return Iterators.map(Iterators.product(cands_lists...)) do choice
+                σ = Dict{Any,Any}(zip(directions, choice))
+                (x, σ)
+            end
+        end
+    )
+end
+
+# `Base.iterate` lifts the inner stream to a stateful iterator. The state
+# carries the underlying `Iterators.flatten` object so we don't rebuild
+# the `y_by_d` index between steps.
+function Base.iterate(s::BicomoduleComposePosSet)
+    stream = _compose_position_stream(s)
+    res = iterate(stream)
+    res === nothing && return nothing
+    val, st = res
+    return val, (stream, st)
+end
+
+function Base.iterate(::BicomoduleComposePosSet, state)
+    stream, st = state
+    res = iterate(stream, st)
+    res === nothing && return nothing
+    val, new_st = res
+    return val, (stream, new_st)
+end
+
+Base.length(s::BicomoduleComposePosSet) = _lazy_compose_length(s.M, s.N)
+Base.eltype(::Type{BicomoduleComposePosSet}) = Tuple
+Base.IteratorSize(::Type{BicomoduleComposePosSet}) = Base.HasLength()
+
+cardinality(s::BicomoduleComposePosSet) = Finite(_lazy_compose_length(s.M, s.N))
 
 function ==(a::BicomoduleComposePosSet, b::BicomoduleComposePosSet)
     # Two lazy carriers are equal iff their factor bicomodules are
@@ -1131,6 +1569,14 @@ hash(s::BicomoduleComposePosSet, h::UInt) =
 function show(io::IO, s::BicomoduleComposePosSet)
     print(io, "BicomoduleComposePosSet(M ⊙ N positions)")
 end
+
+# Polymorphic position-iteration. Used by validators to walk a
+# `Polynomial.positions` regardless of whether it's a `FinPolySet`
+# (with `.elements`) or a streaming lazy `BicomoduleComposePosSet`.
+# Adding cases here lets future lazy `PolySet` subtypes plug in.
+_iter_positions(s::FinPolySet) = s.elements
+_iter_positions(s::BicomoduleComposePosSet) = s
+_iter_positions(s::PolySet) = s.elements   # default: assume `.elements` exists
 
 positions(p::LazyBicomoduleCarrier) = BicomoduleComposePosSet(p.M, p.N)
 
@@ -1332,30 +1778,57 @@ end
     compose_lazy(M::Bicomodule, N::Bicomodule) -> Bicomodule
 
 Lazy variant of [`compose(::Bicomodule, ::Bicomodule)`](@ref). Returns a
-`Bicomodule` whose carrier wraps a [`LazyBicomoduleCarrier`](@ref) and
-whose positions are NOT enumerated up front. Use when the eager
-`Π_a #compatible_y(a)` position count would be too large for memory but
-you only need shape-level reasoning (e.g. `is_subst_of`, downstream
-construction).
+`Bicomodule` whose carrier `.positions` is a streaming
+[`BicomoduleComposePosSet`](@ref) — the `Π_a #compatible_y(a)` position
+count is *not* enumerated up front. Validators
+([`validate_bicomodule_detailed`](@ref) and the underlying
+right/left-comodule validators) accept this lazy form directly via
+`_iter_positions` and walk positions one at a time.
 
-When validators (`validate_bicomodule_detailed`) or any code that
-iterates `.positions.elements` runs on the result, the carrier
-materializes — at which point this is no different from `compose`. The
-lazy form's value is in keeping the eager enumeration out of the
-type-check / construction path.
+Use when the eager position count would be too large to materialize as
+a `FinPolySet`, or when you only need shape-level reasoning (e.g.
+`is_subst_of`, downstream lens construction).
+
+# v0.4 behavior change
+
+Prior to v0.4, `compose_lazy` materialized its position-set immediately
+and was no different from `compose` once any `.elements` access fired.
+v0.4 makes `compose_lazy` truly streaming: the only up-front cost is
+the `|N.carrier.positions|`-sized index built by `_build_y_by_d`; the
+`(x, σ)` pairs themselves are yielded by `Iterators.flatten` /
+`Iterators.product` without ever filling a vector.
+
+# Forcing materialization
+
+If a caller really wants the eager `Polynomial` carrier (e.g. to pass
+through APIs that only accept `FinPolySet`), call
+[`materialize(::LazyBicomoduleCarrier)`](@ref) explicitly on
+`LazyBicomoduleCarrier(M, N)` — that path is unchanged.
 """
 function compose_lazy(M::Bicomodule, N::Bicomodule)
     M.right_base.carrier == N.left_base.carrier ||
         error("compose_lazy(::Bicomodule, ::Bicomodule): M's right base must equal N's left base")
-    # We still need a `Polynomial` carrier (validators expect FinPolySet
-    # positions). Materialize the lazy carrier here — `compose_lazy`'s
-    # benefit is that the enumeration is cheap for the typical case where
-    # candidate counts are bounded; for genuinely-large carriers the
-    # caller wraps `LazyBicomoduleCarrier` directly into their
-    # `is_subst_of` shape checks. The extension hook is exposed via the
-    # struct so downstream code can take that path explicitly.
-    lazy = LazyBicomoduleCarrier(M, N)
-    new_carrier = materialize(lazy)
+    # Build a `Polynomial` whose `.positions` is the streaming
+    # `BicomoduleComposePosSet`. The direction_at function computes
+    # the direction-set per `(x, σ)` key — same body as `compose`, but
+    # called lazily.
+    pos_set = BicomoduleComposePosSet(M, N)
+    X = M.carrier
+    Y = N.carrier
+    new_carrier_dir = key -> begin
+        x, σ = key
+        Dx = direction_at(X, x)::FinPolySet
+        out = Tuple[]
+        for a in Dx.elements
+            σa = σ[a]
+            Dy = direction_at(Y, σa)::FinPolySet
+            for b in Dy.elements
+                push!(out, (a, b))
+            end
+        end
+        FinPolySet(out)
+    end
+    new_carrier = Polynomial(pos_set, new_carrier_dir)
     _compose_build_bicomodule(M, N, new_carrier)
 end
 
@@ -1419,16 +1892,22 @@ fails).
   - `:N` — same for `N`.
   - `:cross` — operands are each valid, but their composition fails.
     Specifically:
-      * `M.right_base !== N.left_base` (object-identity mismatch on the
-        bridging comonoid).
       * `M.right_base.carrier != N.left_base.carrier` (structural
-        mismatch even though `===` would have caught the typical case).
+        mismatch — `compose(M, N)` will error).
       * For some `x ∈ M.carrier.positions` and direction `a ∈ M.carrier[x]`,
         no `y ∈ N.carrier.positions` matches the D-routing — the
         composite would drop `x` from positions, which is structurally
         fine but flagged here as cross-coherence so callers can decide
         whether the bicomodule is genuinely empty over `x` or whether
         the routing tables are buggy.
+
+    The `M.right_base !== N.left_base` case (object-identity mismatch
+    on the bridging comonoid where carriers nonetheless match by `==`)
+    is treated as a SOFT note: `compose(M, N)` itself uses `==` on
+    carriers and will succeed, so this validator does not flag it as a
+    failure. The diagnostic is still printed under `verbose=true` /
+    `:all` so callers whose downstream code requires `===` on bases
+    (e.g. `BicomoduleMorphism`) can detect it.
 
 # Use as a guard
 
@@ -1484,18 +1963,27 @@ function validate_bicomodule_composition_detailed(M::Bicomodule, N::Bicomodule;
             collect_all || return fail(failures, summary="middle comonoid mismatch")
         else
             # Carriers match but bases are distinct objects. compose() uses
-            # `==` on carriers (not `===` on the Comonoid) so this WILL succeed,
-            # but it's worth surfacing as a soft cross-coherence note.
-            f = ValidationFailure(
-                :compose_base_identity, (:cross, :base_object_identity),
-                "M.right_base !== N.left_base (object identity) but carriers " *
-                "match by `==`. compose(M, N) will succeed; flag this if you " *
-                "expected `===` (e.g. when downstream code relies on " *
-                "BicomoduleMorphism's `===`-on-bases requirement)",
-                objectid(M.right_base), objectid(N.left_base))
-            push!(failures, f)
-            verbose === true && println("composition (cross/base-object): ", f.structural_hint)
-            collect_all || return fail(failures, summary="base object identity differs")
+            # `==` on carriers (not `===` on the Comonoid), so this is a SOFT
+            # cross-coherence note: it does NOT cause this validator to fail.
+            #
+            # We surface the diagnostic when verbose is true / :all so callers
+            # whose downstream code does need `===` on bases (e.g.
+            # BicomoduleMorphism) can still see it. But .passed tracks what
+            # `compose(M, N)` will actually do, which is succeed.
+            #
+            # See v0.4.x note: this matches the precedent set by
+            # subst_targeted_lens_lazy / Lens.cod widening — validators should
+            # accept the actual semantics, not a stricter caricature.
+            if verbose === true || verbose === :all
+                println("composition (cross/base-object): M.right_base !== ",
+                        "N.left_base (object identity) but carriers match by ",
+                        "`==`. compose(M, N) will succeed; flag this if you ",
+                        "expected `===` (e.g. when downstream code relies on ",
+                        "BicomoduleMorphism's `===`-on-bases requirement). ",
+                        "objectids: $(objectid(M.right_base)) vs ",
+                        "$(objectid(N.left_base))")
+            end
+            # Intentionally NOT pushed to `failures` — this is a soft note.
         end
     end
 
@@ -1687,6 +2175,529 @@ function parallel(M::Bicomodule, N::Bicomodule)
                new_left_coaction, new_right_coaction)
 end
 
+# ============================================================
+# Cat# vertical–horizontal interaction (v0.4.x #5)
+# ============================================================
+#
+# `base_change_left(F::Retrofunctor, M::Bicomodule)` is the canonical
+# "vertical morphism acts on a horizontal morphism by base-change"
+# operation in the Cat# double category. Given F : C₀ → C and M : C ⇸ D,
+# the result F* M : C₀ ⇸ D restricts M's left base from C to C₀ along F.
+#
+# Categorical content (per Niu/Spivak Ch. 8 / Spivak's Cat# notes):
+# F* M ≅ F̂ ⊙ M where F̂ : C₀ ⇸ C is the companion bicomodule of F. The
+# direct construction below skips the explicit companion and produces
+# an equivalent bicomodule object.
+#
+# Direction-of-subst design question (resolved 2026-05-02):
+# The user's suggested body composed M.left_coaction with
+# `subst(F.underlying, identity_lens(M.carrier))`. That body assumes
+# `subst(::Lens, ::Lens)` is contravariant in its first argument. In
+# Poly.jl `subst(f, g)` is COVARIANT in both arguments — see
+# `Monoidal.jl` `subst(::Lens, ::Lens)`. So `subst(F.underlying, id)`
+# goes `subst(C₀, M) → subst(C, M)` — the wrong direction for a
+# direct post-composition with M.left_coaction. We construct the new
+# coaction's on_positions / on_directions explicitly via
+# `subst_targeted_lens`, using F's lens structure to translate
+# C-positions back to C₀-positions and C-directions back to
+# C₀-directions.
+#
+# Generality: this works whenever F.on_positions is **injective on the
+# image of M.left_coaction** and F.on_directions is injective at each
+# c0_pos. PolyCDS's alphabet-inclusion case satisfies both. For
+# non-injective F the result is ill-defined; we error with a clear
+# message rather than silently picking a non-canonical preimage.
+
+"""
+    base_change_left(F::Retrofunctor, M::Bicomodule) -> Bicomodule
+
+Restrict `M : F.cod ⇸ D` along the comonoid morphism `F : F.dom → F.cod`
+to produce `F* M : F.dom ⇸ D`. Carrier and right coaction are unchanged;
+left base becomes `F.dom`; the left coaction is re-routed through `F`'s
+underlying lens.
+
+Companion to [`parallel(::Bicomodule, ::Bicomodule)`](@ref) — both are
+2-cell-of-double-category operations on bicomodules. `base_change_left`
+handles vertical (Retrofunctor) action on the left base; `parallel`
+handles horizontal (tensor) action.
+
+# Construction (operational)
+
+For each `x ∈ M.carrier(1)`:
+
+1. `(c_pos, mbar_C) = M.left_coaction.on_positions(x)` — original C-routing.
+2. Find `c0_pos ∈ F.dom.carrier.positions` with `F.on_positions(c0_pos) = c_pos`.
+   If F has no preimage of `c_pos`, error. If F has multiple, error
+   (non-canonical choice).
+3. Build `mbar_C0 : F.dom.carrier[c0_pos] → M.carrier(1)` by inverting
+   `F.on_directions(c0_pos)` on each `b₀ ∈ F.dom.carrier[c0_pos]`,
+   yielding `b_C ∈ F.cod.carrier[c_pos]`, then `mbar_C0(b₀) = mbar_C(b_C)`.
+
+The new on-directions function reuses `M.left_coaction.on_directions`
+with the same direction-preimage lookup.
+
+# Errors
+
+  - `F.cod.carrier ≠ M.left_base.carrier` — base mismatch.
+  - F has no C₀-preimage for some C-position M emits.
+  - F is non-injective on positions in the image of M's coaction (multiple
+    C₀-preimages for the same C-position).
+  - F.on_directions is non-injective at some c0_pos (multiple C-directions
+    map to the same C₀-direction).
+
+# Properties expected (verifiable by tests)
+
+  - `base_change_left(identity_retrofunctor(C), M)` is element-wise equal to M.
+  - `base_change_left(compose(F, G), M) ≅ base_change_left(F, base_change_left(G, M))`
+    (functoriality).
+  - If `F` validates as a retrofunctor and `M` validates as a bicomodule,
+    the result validates as a bicomodule.
+
+# Out of scope (separate asks)
+
+  - `base_change_right(M::Bicomodule, G::Retrofunctor)` — symmetric on
+    the right base.
+  - `companion(F::Retrofunctor) -> Bicomodule` — the explicit companion
+    construction. Strictly more general; ask separately if needed.
+  - `bicomodule_morphism_over` — cross-base 2-cells. See `Cofree.jl`
+    `BicomoduleMorphism` constructor for the deferred note.
+"""
+function base_change_left(F::Retrofunctor, M::Bicomodule)
+    F.cod.carrier == M.left_base.carrier ||
+        error("base_change_left: F.cod.carrier ≠ M.left_base.carrier")
+
+    # v0.4.x forward-direction patch: when F carries a forward-direction
+    # action (populated canonically by `cofree_morphism` and
+    # `tuple_retrofunctor`), iterate dom-directions forward instead of
+    # inverting the back-action over cod-directions. This handles
+    # partial-image retrofunctors (e.g. tuple-of-cofree-morphisms with
+    # non-image direction tuples) that the backward path can't.
+    if F.forward_on_directions !== nothing
+        return _base_change_left_forward(F, M)
+    end
+
+    new_left_base = F.dom
+    C0 = F.dom.carrier
+    C  = F.cod.carrier
+    F_pos = F.underlying.on_positions.f
+    F_dir = F.underlying.on_directions.f   # F_dir(c0_pos) returns a PolyFunction
+
+    C0.positions isa FinPolySet ||
+        error("base_change_left: requires F.dom.carrier.positions to be FinPolySet " *
+              "for the position-preimage lookup")
+
+    # Precompute F⁻¹ on positions: c_pos → list of c0_pos preimages.
+    preimage_table = Dict{Any,Vector{Any}}()
+    for c0_pos in C0.positions.elements
+        push!(get!(() -> Any[], preimage_table, F_pos(c0_pos)), c0_pos)
+    end
+
+    # EAGER injectivity check: scan all c_pos values M.left_coaction emits
+    # and verify each has a unique F-preimage. The lens-construction path
+    # would defer this to first-call of new_on_pos, but constructors that
+    # @test_throws on the expected error need the failure to surface
+    # at construction time. For the regular `M.carrier.positions isa
+    # FinPolySet` case (which is the bicomodule-validator's precondition
+    # anyway) this is O(|M.positions|).
+    if M.carrier.positions isa FinPolySet
+        for x in M.carrier.positions.elements
+            c_pos, _ = M.left_coaction.on_positions.f(x)
+            cands = get(preimage_table, c_pos, Any[])
+            isempty(cands) &&
+                error("base_change_left: no F.dom-position maps to C-position $c_pos " *
+                      "via F.on_positions; F is not surjective in the image of M.left_coaction")
+            length(cands) > 1 &&
+                error("base_change_left: F is not injective on positions (C-position " *
+                      "$c_pos has preimages $cands). v0.4.x supports injective F only.")
+        end
+    end
+
+    # Build a per-c0_pos cache of F.on_directions inversion, lazily
+    # populated as new c0_pos values appear during coaction evaluation.
+    dir_inverse_cache = Dict{Any,Dict{Any,Any}}()
+
+    _build_dir_inverse = c0_pos -> begin
+        haskey(dir_inverse_cache, c0_pos) && return dir_inverse_cache[c0_pos]
+        c_pos = F_pos(c0_pos)
+        C_dirs = direction_at(C, c_pos)::FinPolySet
+        F_dir_at = F_dir(c0_pos)::PolyFunction
+        b0_to_bC = Dict{Any,Any}()
+        for b_C in C_dirs.elements
+            b_0 = F_dir_at.f(b_C)
+            if haskey(b0_to_bC, b_0)
+                error("base_change_left: F.on_directions at c0_pos=$c0_pos is not " *
+                      "injective (C-directions $(b0_to_bC[b_0]) and $b_C both map " *
+                      "to C₀-direction $b_0). Cannot determine mbar_new.")
+            end
+            b0_to_bC[b_0] = b_C
+        end
+        dir_inverse_cache[c0_pos] = b0_to_bC
+        b0_to_bC
+    end
+
+    # Internal: at carrier-position x, recover (c0_pos, b0_to_bC, mbar_C, c_pos).
+    _x_data = x -> begin
+        c_pos, mbar_C = M.left_coaction.on_positions.f(x)
+        cands = get(preimage_table, c_pos, Any[])
+        isempty(cands) &&
+            error("base_change_left: no F.dom-position maps to C-position $c_pos via " *
+                  "F.on_positions; F is not surjective in the image of M.left_coaction")
+        length(cands) > 1 &&
+            error("base_change_left: F is not injective on positions (C-position " *
+                  "$c_pos has preimages $cands). v0.4.x supports injective F only.")
+        c0_pos = cands[1]
+        b0_to_bC = _build_dir_inverse(c0_pos)
+        (c0_pos, b0_to_bC, mbar_C, c_pos)
+    end
+
+    new_on_pos = x -> begin
+        c0_pos, b0_to_bC, mbar_C, _ = _x_data(x)
+        C0_dirs = direction_at(C0, c0_pos)::FinPolySet
+        mbar_new = Dict{Any,Any}()
+        for b_0 in C0_dirs.elements
+            haskey(b0_to_bC, b_0) ||
+                error("base_change_left: C₀-direction $b_0 at c0_pos=$c0_pos has no " *
+                      "C-direction preimage via F.on_directions")
+            mbar_new[b_0] = mbar_C[b0_to_bC[b_0]]
+        end
+        (c0_pos, mbar_new)
+    end
+
+    # `subst_targeted_lens` callback shape: (x, b_0, b) -> dom_direction.
+    # b_0 ∈ C₀.dirs[c0_pos], b ∈ M.carrier[mbar_new(b_0)].
+    new_on_dir = (x, b_0, b) -> begin
+        _, b0_to_bC, _, _ = _x_data(x)
+        haskey(b0_to_bC, b_0) ||
+            error("base_change_left: C₀-direction $b_0 has no C-direction preimage")
+        b_C = b0_to_bC[b_0]
+        M.left_coaction.on_directions.f(x).f((b_C, b))
+    end
+
+    new_left_coaction = subst_targeted_lens(M.carrier, C0, M.carrier, new_on_pos, new_on_dir)
+
+    Bicomodule(M.carrier, new_left_base, M.right_base,
+               new_left_coaction, M.right_coaction)
+end
+
+# ============================================================
+# base_change_left — forward-iteration variant (v0.4.x patch)
+# ============================================================
+#
+# Used when `F.forward_on_directions !== nothing`. Iterate dom-directions
+# forward and apply F.forward to find each cod-direction directly,
+# instead of iterating cod-directions and inverting F.on_directions.
+#
+# Categorical equivalence: produces the same bicomodule as the backward
+# path on cases where both apply (i.e. when F.on_directions is bijective
+# at every position M's coaction visits — backward inverts, forward
+# walks forward, and they witness the same lens). Additionally succeeds
+# on partial-image cases where the backward path can't, because non-
+# image cod-directions are simply never touched.
+#
+# Position injectivity check is identical to the backward path.
+# F.on_directions injectivity check is dropped — irrelevant when we
+# don't invert it.
+function _base_change_left_forward(F::Retrofunctor, M::Bicomodule)
+    new_left_base = F.dom
+    C0 = F.dom.carrier
+    F_pos = F.underlying.on_positions.f
+    F_fwd = F.forward_on_directions::Function
+
+    C0.positions isa FinPolySet ||
+        error("base_change_left: requires F.dom.carrier.positions to be FinPolySet " *
+              "for the position-preimage lookup")
+
+    # Position-preimage table (mirrors the backward path).
+    preimage_table = Dict{Any,Vector{Any}}()
+    for c0_pos in C0.positions.elements
+        push!(get!(() -> Any[], preimage_table, F_pos(c0_pos)), c0_pos)
+    end
+
+    # Eager position-injectivity check on the image of M.left_coaction
+    # (mirrors backward path). Runs only for finite carrier positions.
+    if M.carrier.positions isa FinPolySet
+        for x in M.carrier.positions.elements
+            c_pos, _ = M.left_coaction.on_positions.f(x)
+            cands = get(preimage_table, c_pos, Any[])
+            isempty(cands) &&
+                error("base_change_left: no F.dom-position maps to C-position $c_pos " *
+                      "via F.on_positions; F is not surjective in the image of M.left_coaction")
+            length(cands) > 1 &&
+                error("base_change_left: F is not injective on positions (C-position " *
+                      "$c_pos has preimages $cands). v0.4.x supports injective F only.")
+        end
+    end
+
+    _resolve_c0 = c_pos -> begin
+        cands = get(preimage_table, c_pos, Any[])
+        isempty(cands) &&
+            error("base_change_left: no F.dom-position maps to C-position $c_pos " *
+                  "via F.on_positions; F is not surjective in the image of M.left_coaction")
+        length(cands) > 1 &&
+            error("base_change_left: F is not injective on positions (C-position " *
+                  "$c_pos has preimages $cands). v0.4.x supports injective F only.")
+        cands[1]
+    end
+
+    new_on_pos = x -> begin
+        c_pos, mbar_C = M.left_coaction.on_positions.f(x)
+        c0_pos = _resolve_c0(c_pos)
+        F_fwd_at = F_fwd(c0_pos)
+        C0_dirs = direction_at(C0, c0_pos)::FinPolySet
+        mbar_new = Dict{Any,Any}()
+        for b_0 in C0_dirs.elements
+            b_C = F_fwd_at.f(b_0)
+            mbar_new[b_0] = mbar_C[b_C]
+        end
+        (c0_pos, mbar_new)
+    end
+
+    # `subst_targeted_lens` callback shape: (x, b_0, b) -> dom_direction.
+    new_on_dir = (x, b_0, b) -> begin
+        c_pos, _ = M.left_coaction.on_positions.f(x)
+        c0_pos = _resolve_c0(c_pos)
+        b_C = F_fwd(c0_pos).f(b_0)
+        M.left_coaction.on_directions.f(x).f((b_C, b))
+    end
+
+    new_left_coaction = subst_targeted_lens(M.carrier, C0, M.carrier,
+                                            new_on_pos, new_on_dir)
+
+    Bicomodule(M.carrier, new_left_base, M.right_base,
+               new_left_coaction, M.right_coaction)
+end
+
+"""
+    base_change_right(M::Bicomodule, G::Retrofunctor) -> Bicomodule
+
+Symmetric to [`base_change_left`](@ref). Restrict `M : C ⇸ G.cod` along
+`G : G.dom → G.cod` to produce `M·G* : C ⇸ G.dom`. Carrier and left
+coaction unchanged; right base becomes `G.dom`; right coaction is
+re-routed through `G`'s underlying lens.
+
+# Construction
+
+For each `x ∈ M.carrier(1)` and each carrier-direction `a ∈ M.carrier[x]`:
+
+1. `(_, mbar_R) = M.right_coaction.on_positions(x)` gives the original
+   routing `mbar_R : M.carrier[x] → G.cod.carrier.positions`.
+2. For each `a`, find a `d0_pos` with `G.on_positions(d0_pos) = mbar_R(a)`.
+   If no preimage / multiple preimages, error.
+3. New mbar maps `a ↦ d0_pos`.
+
+Direction routing inverts `G.on_directions(d0_pos)` per direction-pair,
+mirroring `base_change_left`'s symmetric pattern.
+
+# Errors
+
+  - `G.cod.carrier ≠ M.right_base.carrier` — base mismatch.
+  - G has no preimage for some right-base position M routes to.
+  - G is non-injective on positions (in M's image) or directions.
+
+# Note (PolyCDS)
+
+Not used by PolyCDS v1.7 directly; bundled for API symmetry with
+`base_change_left`. Future callers projecting to a smaller right base
+(e.g., narrowing a "full diagnostic state" comonoid to a "core
+problem-list" comonoid) will use this.
+"""
+function base_change_right(M::Bicomodule, G::Retrofunctor)
+    G.cod.carrier == M.right_base.carrier ||
+        error("base_change_right: G.cod.carrier ≠ M.right_base.carrier")
+
+    # v0.4.x forward-direction patch (mirror of base_change_left).
+    if G.forward_on_directions !== nothing
+        return _base_change_right_forward(M, G)
+    end
+
+    new_right_base = G.dom
+    D0 = G.dom.carrier
+    D  = G.cod.carrier
+    G_pos = G.underlying.on_positions.f
+    G_dir = G.underlying.on_directions.f
+
+    D0.positions isa FinPolySet ||
+        error("base_change_right: requires G.dom.carrier.positions to be FinPolySet " *
+              "for the position-preimage lookup")
+
+    preimage_table = Dict{Any,Vector{Any}}()
+    for d0_pos in D0.positions.elements
+        push!(get!(() -> Any[], preimage_table, G_pos(d0_pos)), d0_pos)
+    end
+
+    # EAGER injectivity check (mirroring base_change_left). Scan all base-
+    # positions M's right coaction emits and verify each has a unique
+    # G-preimage. Errors at construction time, not lazily on first call.
+    if M.carrier.positions isa FinPolySet
+        for x in M.carrier.positions.elements
+            _, mbar_D = M.right_coaction.on_positions.f(x)
+            carrier_dirs = direction_at(M.carrier, x)::FinPolySet
+            for a in carrier_dirs.elements
+                d_pos = mbar_D[a]
+                cands = get(preimage_table, d_pos, Any[])
+                isempty(cands) &&
+                    error("base_change_right: no G.dom-position maps to D-position " *
+                          "$d_pos via G.on_positions; G is not surjective in the " *
+                          "image of M.right_coaction")
+                length(cands) > 1 &&
+                    error("base_change_right: G is not injective on positions " *
+                          "(D-position $d_pos has preimages $cands). v0.4.x supports " *
+                          "injective G only.")
+            end
+        end
+    end
+
+    # Per-d0_pos cache of G.on_directions inversion.
+    dir_inverse_cache = Dict{Any,Dict{Any,Any}}()
+    _build_dir_inverse = d0_pos -> begin
+        haskey(dir_inverse_cache, d0_pos) && return dir_inverse_cache[d0_pos]
+        d_pos = G_pos(d0_pos)
+        D_dirs = direction_at(D, d_pos)::FinPolySet
+        G_dir_at = G_dir(d0_pos)::PolyFunction
+        e0_to_eD = Dict{Any,Any}()
+        for e_D in D_dirs.elements
+            e_0 = G_dir_at.f(e_D)
+            if haskey(e0_to_eD, e_0)
+                error("base_change_right: G.on_directions at d0_pos=$d0_pos is not " *
+                      "injective (D-directions $(e0_to_eD[e_0]) and $e_D both map to " *
+                      "D₀-direction $e_0). Cannot determine new mbar.")
+            end
+            e0_to_eD[e_0] = e_D
+        end
+        dir_inverse_cache[d0_pos] = e0_to_eD
+        e0_to_eD
+    end
+
+    # Per-direction-of-x cache of (a → d0_pos) lookup, since the right
+    # coaction's mbar maps each direction-of-x to a base-position
+    # potentially distinct per a.
+    _resolve_d0 = d_pos -> begin
+        cands = get(preimage_table, d_pos, Any[])
+        isempty(cands) &&
+            error("base_change_right: no G.dom-position maps to D-position $d_pos via " *
+                  "G.on_positions; G is not surjective in the image of M.right_coaction")
+        length(cands) > 1 &&
+            error("base_change_right: G is not injective on positions (D-position " *
+                  "$d_pos has preimages $cands). v0.4.x supports injective G only.")
+        cands[1]
+    end
+
+    new_on_pos = x -> begin
+        x_first, mbar_D = M.right_coaction.on_positions.f(x)
+        # Right comodule's first component should preserve x; pass through.
+        carrier_dirs = direction_at(M.carrier, x)::FinPolySet
+        mbar_new = Dict{Any,Any}()
+        for a in carrier_dirs.elements
+            d_pos = mbar_D[a]
+            mbar_new[a] = _resolve_d0(d_pos)
+        end
+        (x_first, mbar_new)
+    end
+
+    # subst_targeted_lens callback shape: (x, a, e_0) -> dom_direction.
+    # a ∈ M.carrier[x], e_0 ∈ D₀.dirs[mbar_new(a)]. We invert G.on_directions
+    # to get an e_D, then defer to M.right_coaction.on_directions(x).f((a, e_D)).
+    new_on_dir = (x, a, e_0) -> begin
+        _, mbar_D = M.right_coaction.on_positions.f(x)
+        d_pos = mbar_D[a]
+        d0_pos = _resolve_d0(d_pos)
+        e0_to_eD = _build_dir_inverse(d0_pos)
+        haskey(e0_to_eD, e_0) ||
+            error("base_change_right: D₀-direction $e_0 at d0_pos=$d0_pos has no " *
+                  "D-direction preimage via G.on_directions")
+        e_D = e0_to_eD[e_0]
+        M.right_coaction.on_directions.f(x).f((a, e_D))
+    end
+
+    new_right_coaction = subst_targeted_lens(M.carrier, M.carrier, D0,
+                                              new_on_pos, new_on_dir)
+
+    Bicomodule(M.carrier, M.left_base, new_right_base,
+               M.left_coaction, new_right_coaction)
+end
+
+# ============================================================
+# base_change_right — forward-iteration variant (v0.4.x patch)
+# ============================================================
+#
+# Mirror of `_base_change_left_forward`. When G carries a forward action,
+# iterate D₀-directions forward and apply G.forward to find each
+# D-direction directly, instead of inverting G.on_directions over D-dirs.
+function _base_change_right_forward(M::Bicomodule, G::Retrofunctor)
+    new_right_base = G.dom
+    D0 = G.dom.carrier
+    G_pos = G.underlying.on_positions.f
+    G_fwd = G.forward_on_directions::Function
+
+    D0.positions isa FinPolySet ||
+        error("base_change_right: requires G.dom.carrier.positions to be FinPolySet " *
+              "for the position-preimage lookup")
+
+    preimage_table = Dict{Any,Vector{Any}}()
+    for d0_pos in D0.positions.elements
+        push!(get!(() -> Any[], preimage_table, G_pos(d0_pos)), d0_pos)
+    end
+
+    # Eager position-injectivity check on the image of M.right_coaction.
+    if M.carrier.positions isa FinPolySet
+        for x in M.carrier.positions.elements
+            _, mbar_D = M.right_coaction.on_positions.f(x)
+            carrier_dirs = direction_at(M.carrier, x)::FinPolySet
+            for a in carrier_dirs.elements
+                d_pos = mbar_D[a]
+                cands = get(preimage_table, d_pos, Any[])
+                isempty(cands) &&
+                    error("base_change_right: no G.dom-position maps to D-position " *
+                          "$d_pos via G.on_positions; G is not surjective in the " *
+                          "image of M.right_coaction")
+                length(cands) > 1 &&
+                    error("base_change_right: G is not injective on positions " *
+                          "(D-position $d_pos has preimages $cands). v0.4.x supports " *
+                          "injective G only.")
+            end
+        end
+    end
+
+    _resolve_d0 = d_pos -> begin
+        cands = get(preimage_table, d_pos, Any[])
+        isempty(cands) &&
+            error("base_change_right: no G.dom-position maps to D-position $d_pos " *
+                  "via G.on_positions; G is not surjective in the image of M.right_coaction")
+        length(cands) > 1 &&
+            error("base_change_right: G is not injective on positions (D-position " *
+                  "$d_pos has preimages $cands). v0.4.x supports injective G only.")
+        cands[1]
+    end
+
+    new_on_pos = x -> begin
+        x_first, mbar_D = M.right_coaction.on_positions.f(x)
+        carrier_dirs = direction_at(M.carrier, x)::FinPolySet
+        mbar_new = Dict{Any,Any}()
+        for a in carrier_dirs.elements
+            d_pos = mbar_D[a]
+            mbar_new[a] = _resolve_d0(d_pos)
+        end
+        (x_first, mbar_new)
+    end
+
+    # subst_targeted_lens callback shape: (x, a, e_0) -> dom_direction.
+    # a ∈ M.carrier[x], e_0 ∈ D₀.dirs[mbar_new(a)]. Use G.forward to
+    # translate `e_0 ↦ e_D` directly (no inversion).
+    new_on_dir = (x, a, e_0) -> begin
+        _, mbar_D = M.right_coaction.on_positions.f(x)
+        d_pos = mbar_D[a]
+        d0_pos = _resolve_d0(d_pos)
+        e_D = G_fwd(d0_pos).f(e_0)
+        M.right_coaction.on_directions.f(x).f((a, e_D))
+    end
+
+    new_right_coaction = subst_targeted_lens(M.carrier, M.carrier, D0,
+                                              new_on_pos, new_on_dir)
+
+    Bicomodule(M.carrier, M.left_base, new_right_base,
+               M.left_coaction, new_right_coaction)
+end
+
 """
     validate_bicomodule(B::Bicomodule; verbose=false) -> Bool
 
@@ -1724,8 +2735,12 @@ to [`minimal_failing_triple`](@ref) to surface the lex-smallest.
 function validate_bicomodule_detailed(B::Bicomodule; verbose::Union{Bool,Symbol}=false)
     X = B.carrier
     pp = X.positions
-    pp isa FinPolySet ||
-        error("validate_bicomodule requires finite carrier positions")
+    # Accept either FinPolySet or a lazy streaming PolySet (v0.4: the
+    # truly-lazy `BicomoduleComposePosSet` from `compose_lazy`).
+    (pp isa FinPolySet || pp isa BicomoduleComposePosSet) ||
+        error("validate_bicomodule requires finite or lazy-streamable carrier positions; " *
+              "got $(typeof(pp))")
+    pos_iter = _iter_positions(pp)
 
     cL = B.left_base.carrier
     cR = B.right_base.carrier
@@ -1773,7 +2788,7 @@ function validate_bicomodule_detailed(B::Bicomodule; verbose::Union{Bool,Symbol}
     # When :all is requested we collect every failing triple; the helper
     # `minimal_failing_triple` then lets the caller surface the lex-smallest.
     compat_failures = ValidationFailure[]
-    for x in pp.elements
+    for x in pos_iter
         i, mbar_L = λL.on_positions.f(x)
         _, mbar_R_x = λR.on_positions.f(x)
         DcL_i = direction_at(cL, i)::FinPolySet
@@ -2602,14 +3617,31 @@ Kan extension in the 2-category obtained from `Cat#` by collapsing
 2-cells. `D : C ↛ E` and `F : C ↛ E'` share the same source comonoid
 `C`. Returns `Lan_D F : E ↛ E'` (left) or `Ran_D F : E ↛ E'` (right).
 
-Symbolic-aware (Q3.2): inputs may have lazy or symbolic carriers; the
-construction defers materialization to the symbolic layer where
-possible.
+# Symbolic awareness (v0.4)
 
-In v0.3, the implementation handles the **identity** D case
-(`Lan_id_C F = F`) explicitly. Non-identity D requires a coequalizer
-adjustment that the symbolic layer doesn't yet expose; those cases
-error with a pointer to v0.3.x.
+Inputs may have finite or **symbolic** carriers. The dispatch is:
+
+- **Identity `D`** — `Lan_D F ≅ Ran_D F ≅ F` directly. Unit/counit
+  are identity 2-cells. (v0.3.0)
+- **Non-identity `D`, finite carriers** — routes to
+  [`kan_along_bicomodule`](@ref). The 2-cat-collapsed structure
+  coincides with the bicomodule-along-bicomodule construction for
+  finite inputs. (v0.3.0)
+- **Non-identity `D`, symbolic carriers** — emits a
+  [`SymbolicCoequalizer`](@ref)-based structural representation of the
+  extension. The carrier's positions are a `SymbolicCoequalizer` over
+  the parent `D ⊙ F` shape; direction-sets are `SymbolicSet`
+  placeholders; coaction codomains are `LazySubst`s so the bicomodule
+  constructor's `is_subst_of` check passes via the lazy short-circuit.
+  Concrete validation is *not* runnable on this output — symbolic
+  bicomodules can't be enumerated. Use [`factor_through`](@ref) to
+  exhibit the universal property structurally. (v0.4 #1)
+
+Both directions (`:left` for `Σ_D` / `:right` for `Π_D`) are supported
+in all three cases.
+
+See `docs/dev/kan_extensions_construction.md` for the underlying
+construction details.
 """
 function kan_2cat(D::Bicomodule, F::Bicomodule; direction::Symbol=:left)
     direction in (:left, :right) ||
@@ -2633,31 +3665,113 @@ function kan_2cat(D::Bicomodule, F::Bicomodule; direction::Symbol=:left)
         return KanExtension(extension, unit, direction, D, F)
     end
 
-    # Non-identity D, symbolic-aware (Q3.2). For finite carriers we route
-    # through the concrete construction; for symbolic carriers we keep
-    # the structural placeholder behavior.
+    # Non-identity D. Dispatch on whether the carriers can be enumerated.
     Fp = F.carrier.positions
     Dp = D.carrier.positions
     finite_inputs = Fp isa FinPolySet && Dp isa FinPolySet
 
-    if !finite_inputs
-        error("kan_2cat: symbolic non-identity D not yet implemented — " *
-              "requires a coequalizer in the symbolic layer that v0.3.x " *
-              "does not yet expose. See docs/dev/kan_extensions_construction.md §4. " *
-              "Fully-finite inputs ship in v0.3.x; mixed-symbolic deferred to v0.4.")
+    if finite_inputs
+        # Finite non-identity D: dispatch to kan_along_bicomodule. The
+        # 2-cat-collapsed structure coincides with the bicomodule case for
+        # finite inputs (Q3-impl-1 resolved in v0.3.x — for finite carriers
+        # the 2-category and bicomodule-along-bicomodule constructions agree
+        # up to the unit/counit phase).
+        if direction === :left
+            return kan_along_bicomodule(D, F; direction=:left)
+        else
+            return kan_along_bicomodule(D, F; direction=:right)
+        end
     end
 
-    # Finite non-identity D: dispatch to kan_along_bicomodule. The
-    # 2-cat-collapsed structure coincides with the bicomodule case for
-    # finite inputs (Q3-impl-1 resolved in v0.3.x — for finite carriers
-    # the 2-category and bicomodule-along-bicomodule constructions agree
-    # up to the unit/counit phase).
-    if direction === :left
-        return kan_along_bicomodule(D, F; direction=:left)
-    else
-        return kan_along_bicomodule(D, F; direction=:right)
-    end
+    # Symbolic non-identity D (v0.4 #1). Build a structural
+    # SymbolicCoequalizer-positioned extension. Validators / enumerators
+    # don't run on this output; the universal-property witness
+    # `factor_through` returns a typed BicomoduleMorphism that respects
+    # the structure but does not solve the coequalizer.
+    return _kan_2cat_symbolic(D, F, direction)
 end
+
+# Internal: build the symbolic-non-identity-D KanExtension. Delivers a
+# Bicomodule whose carrier has SymbolicCoequalizer positions and SymbolicSet
+# direction-sets; coactions use subst_lazy codomains so the Bicomodule
+# constructor's is_subst_of check short-circuits via the LazySubst path.
+function _kan_2cat_symbolic(D::Bicomodule, F::Bicomodule, direction::Symbol)
+    # Choose bases for the extension. For Σ_D F (left), extension is
+    # E ↛ E', so left_base = D.right_base, right_base = F.right_base.
+    # For Π_D F (right), the dual: left_base = D.right_base, right_base =
+    # F.right_base. (Both directions share base shapes; what differs is
+    # the unit-vs-counit semantics of the universal 2-cell.)
+    left_base  = D.right_base
+    right_base = F.right_base
+
+    # Carrier positions: SymbolicCoequalizer over a SymbolicSet representing
+    # the parent product D.carrier × F.carrier (the would-be coequalizer's
+    # parent set). Relation list starts empty per Q1.2; future work
+    # populates it from the two D-actions.
+    parent_name = Symbol("kan_", direction, "_parent_",
+                         _polyset_tag_safe(D.carrier.positions), "_",
+                         _polyset_tag_safe(F.carrier.positions))
+    parent_pos = SymbolicSet(parent_name)
+    coeq_pos = SymbolicCoequalizer(parent_pos, Tuple{Any,Any}[])
+
+    # Carrier direction-sets: a single SymbolicSet per position (placeholder).
+    direction_name = Symbol("kan_", direction, "_dir")
+    carrier_dir = _key -> SymbolicSet(direction_name)
+    carrier = Polynomial(coeq_pos, carrier_dir)
+
+    # Placeholder coaction position/direction functions: erroring if
+    # actually invoked. Symbolic bicomodules aren't meant to be evaluated
+    # at concrete elements; downstream code that needs evaluation should
+    # specialize the carrier first.
+    _err_pos = key -> error(
+        "kan_2cat (symbolic): on_positions called on symbolic carrier element " *
+        "$key. The symbolic kan_2cat result is structural; evaluating " *
+        "coactions at concrete positions requires specializing the carrier.")
+    _err_dir = (key, b) -> error(
+        "kan_2cat (symbolic): on_directions called on symbolic carrier element " *
+        "$key. The symbolic kan_2cat result is structural.")
+
+    left_coaction  = Lens(carrier, subst_lazy(left_base.carrier,  carrier),
+                          _err_pos, _err_dir)
+    right_coaction = Lens(carrier, subst_lazy(carrier, right_base.carrier),
+                          _err_pos, _err_dir)
+
+    extension = Bicomodule(carrier, left_base, right_base,
+                           left_coaction, right_coaction)
+
+    # Unit/counit: a structurally-typed BicomoduleMorphism. Its source
+    # must share bases by `===` with `extension`. F's bases generally
+    # don't match (extension's left_base = D.right_base, while F's
+    # left_base = D.left_base = C). Build a stub-source Bicomodule with
+    # F's carrier but the extension's bases — same rewrap pattern the
+    # finite-non-identity-D `kan_along_bicomodule` uses (Cofree.jl
+    # ~2706). The coactions are placeholder subst_lazy lenses; they
+    # pass the bicomodule constructor's `is_subst_of` check via the
+    # LazySubst short-circuit and never get invoked at runtime.
+    unit_source = if F.left_base === left_base && F.right_base === right_base
+        F
+    else
+        usl = Lens(F.carrier, subst_lazy(left_base.carrier, F.carrier),
+                   _err_pos, _err_dir)
+        usr = Lens(F.carrier, subst_lazy(F.carrier, right_base.carrier),
+                   _err_pos, _err_dir)
+        Bicomodule(F.carrier, left_base, right_base, usl, usr)
+    end
+
+    unit_lens = Lens(F.carrier, carrier, _err_pos, _err_dir)
+    unit = BicomoduleMorphism(unit_source, extension, unit_lens)
+
+    KanExtension(extension, unit, direction, D, F)
+end
+
+# Internal: a stable label for a PolySet — used when building default
+# parent-name symbols for the symbolic kan_2cat coequalizer. Mirrors
+# `_polyset_tag` in PolySets.jl but tolerates types that don't define
+# the helper.
+_polyset_tag_safe(s::FinPolySet) = :fin
+_polyset_tag_safe(s::SymbolicSet) = s.name
+_polyset_tag_safe(s::SymbolicCoequalizer) = Symbol(_polyset_tag_safe(s.parent), :_q)
+_polyset_tag_safe(s::PolySet) = Symbol(string(typeof(s).name.name))
 """
     factor_through(k::KanExtension, α::BicomoduleMorphism) -> BicomoduleMorphism
 
@@ -2689,9 +3803,16 @@ function factor_through(k::KanExtension, α::BicomoduleMorphism)
     # 2-cell α we recover the factoring morphism by element-wise
     # restriction along the unit/counit.
     Xp = k.extension.carrier.positions
-    Xp isa FinPolySet ||
-        error("factor_through: non-identity D requires finite-carrier extension; " *
-              "symbolic case deferred to v0.4")
+    if !(Xp isa FinPolySet)
+        # Symbolic-extension path (v0.4 #1): the kan_2cat result is a
+        # SymbolicCoequalizer-positioned bicomodule. Return a
+        # structurally-typed factoring morphism whose underlying lens
+        # encodes the universal-property *shape* (k.extension → α.target
+        # for left, or α.source → k.extension for right). Concrete
+        # evaluation of the resulting lens errors at the same placeholders
+        # the unit's lens uses.
+        return _factor_through_symbolic(k, α)
+    end
 
     if k.direction === :left
         # Σ_D M ⇒ N: factor through the unit η : M ⇒ Σ_D M.
@@ -2741,6 +3862,63 @@ function _factor_through_identity_d(k::KanExtension, α::BicomoduleMorphism)
         error("factor_through: α.source.carrier ≠ k.extension.carrier. " *
               "α must originate at the Kan extension's input.")
     α
+end
+
+# Internal: symbolic-extension case of factor_through (v0.4 #1). The
+# extension's carrier has SymbolicCoequalizer positions and SymbolicSet
+# direction-sets, so we can't enumerate. Build a placeholder-functioned
+# lens that satisfies the type signatures; concrete evaluation errors.
+#
+# Base-matching: BicomoduleMorphism requires source.left_base === target.left_base
+# and the same for right_base. The kan_2cat result's bases generally
+# don't match α's, so we rebuild α.target / α.source with the
+# extension's bases — same rewrap pattern as the unit construction.
+function _factor_through_symbolic(k::KanExtension, α::BicomoduleMorphism)
+    _err_pos = key -> error(
+        "factor_through (symbolic): on_positions called on symbolic extension " *
+        "element $key. The factoring 2-cell from a symbolic kan_2cat is " *
+        "structural; evaluating it requires specializing the carrier first.")
+    _err_dir = (key, b) -> error(
+        "factor_through (symbolic): on_directions called on symbolic extension " *
+        "element $key. The factoring 2-cell from a symbolic kan_2cat is structural.")
+
+    ext = k.extension
+
+    if k.direction === :left
+        # Left Kan factoring: k.extension ⇒ α.target.
+        target_for_factor = if α.target.left_base === ext.left_base &&
+                                α.target.right_base === ext.right_base
+            α.target
+        else
+            tl = Lens(α.target.carrier,
+                      subst_lazy(ext.left_base.carrier, α.target.carrier),
+                      _err_pos, _err_dir)
+            tr = Lens(α.target.carrier,
+                      subst_lazy(α.target.carrier, ext.right_base.carrier),
+                      _err_pos, _err_dir)
+            Bicomodule(α.target.carrier, ext.left_base, ext.right_base, tl, tr)
+        end
+        underlying = Lens(ext.carrier, target_for_factor.carrier,
+                          _err_pos, _err_dir)
+        return BicomoduleMorphism(ext, target_for_factor, underlying)
+    else
+        # Right Kan factoring: α.source ⇒ k.extension.
+        source_for_factor = if α.source.left_base === ext.left_base &&
+                                α.source.right_base === ext.right_base
+            α.source
+        else
+            sl = Lens(α.source.carrier,
+                      subst_lazy(ext.left_base.carrier, α.source.carrier),
+                      _err_pos, _err_dir)
+            sr = Lens(α.source.carrier,
+                      subst_lazy(α.source.carrier, ext.right_base.carrier),
+                      _err_pos, _err_dir)
+            Bicomodule(α.source.carrier, ext.left_base, ext.right_base, sl, sr)
+        end
+        underlying = Lens(source_for_factor.carrier, ext.carrier,
+                          _err_pos, _err_dir)
+        return BicomoduleMorphism(source_for_factor, ext, underlying)
+    end
 end
 
 # Unicode aliases per Q3.4.

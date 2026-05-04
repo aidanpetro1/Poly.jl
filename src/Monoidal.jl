@@ -446,8 +446,27 @@ On directions at `(i, j̄)`: `(a', b') ↦ (f♯_i(a'), g♯_{j̄(f♯_i(a'))}(b
 function subst(f::Lens, g::Lens)
     p, p_prime = f.dom, f.cod
     q, q_prime = g.dom, g.cod
-    new_dom = subst(p, q)
-    new_cod = subst(p_prime, q_prime)
+    # Lazy on both sides — third site in the v0.4.x lazy-sweep series.
+    #
+    # The eager forms `subst(p, q)` and `subst(p', q')` materialize
+    # `Σ_x Π_a |q[a]|` jbar dicts each, both of which blow up on PolyCDS-style
+    # fixtures: PolyCDS v1.7's iso test reaches `subst(F.under, F.under)` via
+    # strict-mode `validate_retrofunctor(F)` (`src/Comonoid.jl:1494`),
+    # `compose(F.dom.duplicator, subst(F.under, F.under))`. With cod-only
+    # laziness (the initial fix), the `compose` check
+    # `_struct_equal(F.dom.dup.cod, subst(F.under, F.under).dom)` materialized
+    # the LazySubst against the eager-built dom and hung for 16+ minutes.
+    # With both sides lazy, `_struct_equal(LazySubst, LazySubst)` short-circuits
+    # structurally on the operands.
+    #
+    # This is enabled by the v0.4.x `Lens.dom::AbstractPolynomial` widening
+    # (companion to the earlier `Lens.cod` widening). Downstream consumers
+    # (`Lens ==`, `Bicomodule(...)` constructor's `is_subst_of`, `compose`)
+    # all handle `LazySubst` natively. Sites that genuinely require a
+    # concrete dom (`(::Lens)(::PolySet)` apply, extensional `Lens ==`,
+    # `back_directions`) materialize on demand — they're cold paths.
+    new_dom = subst_lazy(p, q)
+    new_cod = subst_lazy(p_prime, q_prime)
 
     on_pos = key -> begin
         i, jbar = key
@@ -565,6 +584,15 @@ end
 
 ==(a::SubstPolySet, b::SubstPolySet) =
     _struct_equal(a.p, b.p) && _struct_equal(a.q, b.q)
+
+# Iteration hook for `PolyFunction ==` (PolyFunctions.jl). Materialize the
+# substitution polynomial's positions on demand. Only fires when an
+# extensional comparison is requested against a `SubstPolySet` dom — the
+# cost equals the eager `subst(p, q).positions` enumeration that the
+# pre-widening `Lens.dom::Polynomial` would have forced at construction.
+_materialize_polyset_elements(s::SubstPolySet) =
+    (s.p isa ConcretePolynomial && s.q isa ConcretePolynomial) ?
+        subst(s.p, s.q).positions.elements : nothing
 
 # Cross-type equality with `FinPolySet`: materialize the SubstPolySet by
 # computing the eager `subst(p, q).positions` and structurally compare.
@@ -952,12 +980,17 @@ end
 # `(i, j̄)`, a single direction-callback receiving `(x, a, b)` — and
 # handles the unpacking internally.
 #
-# Today the cod is built via eager `subst(p, q)` (because `Lens.cod` must
-# be a `ConcretePolynomial`). PR #1's lazy work only unblocked the
-# Bicomodule constructor's *type-check* against `subst(...)`. A future
-# extension that widens `Lens.cod` to `AbstractPolynomial` would let this
-# helper return a lens with a `LazySubst` cod, fully avoiding the
-# enumeration; until then, this is purely an ergonomics win.
+# The cod is built via `subst_lazy(p, q)` rather than eager `subst(p, q)`.
+# Now that `Lens.cod` is typed as `AbstractPolynomial`, the helper returns
+# a `Lens` with a `LazySubst` cod — no `Σ_i |q(1)|^|p[i]|` enumeration at
+# construction time. Downstream consumers shape-check the cod via
+# `is_subst_of`, which short-circuits on `LazySubst` immediately. The
+# v0.4.x `base_change_left/right` paths would otherwise materialize
+# ~10^12-position polynomials on realistic PolyCDS-style inputs (toy
+# 2-disease fixture: `subst(C0, M.carrier)` with 25 positions and 9
+# direction-set per position → ≈ `25^9` jbars). Per the v0.4.0
+# lazy-everywhere policy, derived-lens codomains are lazy by default;
+# materialize explicitly when needed.
 
 """
     subst_targeted_lens(dom::Polynomial, p::Polynomial, q::Polynomial,
@@ -993,7 +1026,9 @@ helper's output.
 """
 function subst_targeted_lens(dom::Polynomial, p::Polynomial, q::Polynomial,
                               on_pos::Function, on_dir::Function)
-    cod = subst(p, q)
+    # Lazy cod: avoids Σ_i |q(1)|^|p[i]| materialization. See the comment
+    # block above this function for the policy and the v0.4.x fix history.
+    cod = subst_lazy(p, q)
     wrapped_on_dir = (x, ab) -> begin
         a, b = ab
         on_dir(x, a, b)
@@ -1045,3 +1080,92 @@ subst(p::AbstractPolynomial, q::AbstractPolynomial) =
     subst(_to_concrete(p), _to_concrete(q))
 
 coproduct(ps::AbstractPolynomial...) = coproduct((_to_concrete(p) for p in ps)...)
+
+# ============================================================
+# weak_dual — single-variable Dirichlet `[p, y]` (v0.6)
+# ============================================================
+#
+# `weak_dual(p)` is the single-variable Dirichlet weak dual `[p, y]`. In
+# the closed monoidal structure on (Poly, y, ⊗), `[_, y]` is the right
+# adjoint to `_ ⊗ y ≅ _`, so `[p, y]` is the polynomial whose positions
+# are the lenses `p → y` (= sections of `p`) and whose direction-set at
+# each lens is read off the closure formula. This is the same operation
+# as `internal_hom(p, y)`; `weak_dual` is the named alias used in the
+# Spivak/Garner/Fairbanks *Functorial Aggregation* discussion of the
+# linear ↔ conjunctive contravariant equivalence (Theorem 7.19).
+#
+# Niu/Spivak Example 4.81 records the basic identities:
+#
+#     [y^A, y] ≅ Ay          (representable ↦ linear)
+#     [Ay,   y] ≅ y^A        (linear      ↦ representable)
+#
+# So weak_dual swaps representables and linears, and is idempotent up to
+# iso on the reflexive subcategory `{y, y^A, Ay, Ay^B, ...}` they
+# generate. constant polynomials are NOT in that subcategory; in
+# particular `weak_dual(constant(I)) ≅ zero_poly` (no lens
+# `constant(I) → y` exists when I has any element with empty
+# direction-set on the source side). Document this in the docstring; it
+# diverges from the "positions are functions p(1) → p(1)" formulation
+# that some readers expect — the closure-of-⊗ definition is the one the
+# rest of Poly.jl is consistent with (sections, eval_lens, etc.).
+#
+# Implementation: a thin alias around `internal_hom(p, y)`. Lazy operands
+# materialize via the `_to_concrete` helper above.
+
+"""
+    weak_dual(p::AbstractPolynomial) -> AbstractPolynomial
+
+The single-variable Dirichlet **weak dual** `[p, y]`: the closure of the
+parallel product `⊗` evaluated against the unit `y`. By the closure
+adjunction `Poly(q ⊗ p, y) ≅ Poly(q, [p, y])` (Niu/Spivak Prop 4.85
+specialized to `r = y`), positions of `[p, y]` correspond to lenses
+`p → y` (= sections of `p`); direction-sets are inherited from `p`'s
+positions, with the `Σ_{j ∈ p(1)} y[f₁ j]` formula collapsing to
+`p(1)` itself when read pointwise.
+
+# Aliasing
+
+`weak_dual(p)` is definitionally `internal_hom(p, y)`. This name is
+reserved for the **Spivak/Garner/Fairbanks** *Functorial Aggregation*
+treatment of the linear ↔ conjunctive contravariant equivalence
+(Theorem 7.19, paper-side Example 7.2). The named alias is intended to
+be the load-bearing call site once `is_reflexive`, `ConjunctiveBicomodule`,
+and the multi-var Dirichlet `⊗` on `d-Set[c]` ship in v0.7 — they read
+much more clearly with `weak_dual` than with `internal_hom(_, y)`.
+
+# Identities (Niu/Spivak Example 4.81)
+
+```julia
+weak_dual(y)         ≈ y
+weak_dual(y^A)       ≈ Ay        # representable ↦ linear
+weak_dual(Ay)        ≈ y^A       # linear ↦ representable
+weak_dual(weak_dual(y^A)) ≈ y^A  # idempotence on the reflexive subcat
+```
+
+# Caveats
+
+  - `weak_dual(constant(I)) = zero_poly` — there is no lens
+    `constant(I) → y` because the empty direction-set forces the
+    on-direction component to be a function `{:pt} → ∅`, which
+    doesn't exist. `constant`s sit *outside* the reflexive subcategory.
+    A future `is_reflexive(p)` predicate will document this membership
+    boundary; v0.6 leaves the predicate to v0.7 (paper Theorem 7.19).
+  - The user-facing v0.6 ask floated an alternate "positions are
+    functions `p(1) → p(1)`" formula. That construction is **not** the
+    closure of `⊗`; it disagrees with `lens_count(p, y)` and with
+    Niu/Spivak Example 4.81. The closure-of-`⊗` definition is the one
+    the rest of Poly.jl (sections, `eval_lens`, the `internal_hom`
+    machinery) is consistent with, and is what `weak_dual` returns.
+
+# Multi-variable case (v0.7)
+
+The single-variable Dirichlet weak dual generalizes to the multi-var
+Dirichlet `⊗` on `d-Set[c]` (paper Lemma 7.13, Cor 7.15). v0.7 extends
+this dispatch to `weak_dual(p, c)` for a comonoid base `c`; until then,
+the bare `weak_dual(p)` is the `c = 1` (unit comonoid) instance.
+
+See also: [`internal_hom`](@ref), [`sections`](@ref).
+"""
+function weak_dual(p::AbstractPolynomial)
+    internal_hom(_to_concrete(p), y)
+end

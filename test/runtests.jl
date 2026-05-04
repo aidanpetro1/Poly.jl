@@ -2,7 +2,7 @@ using Test
 include(joinpath(@__DIR__, "..", "src", "Poly.jl"))
 using .Poly
 
-@testset "Poly.jl" begin
+@testset verbose=true "Poly.jl" begin
 
     # ============================================================
     # Sprint 1: foundation
@@ -1271,7 +1271,9 @@ using .Poly
     # Extensions v2 (post-v0.2.0): see docs/dev/extensions_v2_design.md
     # ============================================================
     include("test_extensions_v2_representable.jl")
-    include("test_extensions_v2_free_category.jl")
+    # `test_extensions_v2_free_category.jl` retired in v0.4 (the function it
+    # tested, `free_category_comonoid`, was removed). The successor lives at
+    # `test_v04_free_labeled_transition.jl` and is included below.
     include("test_extensions_v2_parallel_comonoid.jl")
     include("test_extensions_v2_back_directions.jl")
     include("test_extensions_v2_from_data.jl")
@@ -1279,5 +1281,62 @@ using .Poly
     include("test_extensions_v2_kan.jl")
     include("test_extensions_v2_support.jl")
     include("test_extensions_v2_lazy_cofree.jl")
+
+    # ============================================================
+    # v0.4 (post-v0.3.1): see docs/dev/extensions_v3_design.md
+    # ============================================================
+    include("test_v04_free_labeled_transition.jl")
+    include("test_v04_lazy_bicomodule.jl")
+    include("test_v04_kan_symbolic.jl")
+    include("test_v04_cofree_on_comonoid.jl")
+    include("test_v04_base_change_left.jl")
+    include("test_v04x_categorical_ops_bundle.jl")
+    include("test_v04x_forward_action.jl")
+    include("test_v04x_lazy_subst_targeted.jl")
+    include("test_v04x_lazy_subst_lens.jl")
+    include("test_v04x_compose_base_identity_soft.jl")
+    include("test_v04x_validate_retrofunctor_forward.jl")
+
+    # ============================================================
+    # v0.6 — AbstractLens supertype (drives PolyMarkov.jl)
+    # ============================================================
+    include("test_v06_abstract_lens.jl")
+
+    # ============================================================
+    # v0.5.1 — PolyAggregation.jl minimum surface
+    # See `docs/dev/extensions_v5_design.md`. Five additive items in
+    # `Comonoid.jl`, `Demos.jl`, and the new `CatSharp.jl`.
+    # ============================================================
+    include("test_v051_polyaggregation_surface.jl")
+
+    # ============================================================
+    # v0.6 — PolyAggregation.jl v0.3.0 prereqs
+    # See the v0.6 PR ask (filed 2026-05-04). Three additive items
+    # (#1 bridge_diagram, #2 weak_dual, #4 span_from_linear_bicomodule)
+    # plus a stub for #3 (comonoid_from_list_polynomial) pending design
+    # resolution. Items #1, #2, #4 in `CatSharp.jl` and `Monoidal.jl`;
+    # #3 in `Demos.jl`.
+    # ============================================================
+    include("test_v06_polyaggregation_v030_prereqs.jl")
+
+    # ============================================================
+    # v0.6.1 — coclosure + Example 5.5 + Lemma 8.7 + is_reflexive
+    # Replaces v0.6's comonoid_from_list_polynomial stub with a paper-
+    # faithful implementation per FA arXiv 2111.10968v7. Adds:
+    # `coclosure(q, p)` (Prop 2.16), `comonoid_from_coclosure(p)`
+    # (Example 5.5), `is_reflexive(p)` (Example 7.2), and the real
+    # `comonoid_from_list_polynomial` (Lemma 8.7) on top.
+    # ============================================================
+    include("test_v061_coclosure.jl")
+
+    # ============================================================
+    # v0.7 (partial) — Full Prop 3.20 bridge_diagram
+    # Promotes the v0.6 NamedTuple return to a typed BridgeDiagram
+    # struct carrying the full (B, E, π, S, T) data. Backward-compatible
+    # with v0.6 via `bd.left_lens` / `bd.right_lens` fields. The bigger
+    # v0.7 work (multi-var Dirichlet ⊗, Theorem 7.19, etc.) is designed
+    # at `docs/dev/extensions_v6_design.md` and ships in subsequent rounds.
+    # ============================================================
+    include("test_v07_full_bridge.jl")
 
 end  # outer @testset "Poly.jl"

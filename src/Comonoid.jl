@@ -549,27 +549,32 @@ function parallel(c1::Comonoid, c2::Comonoid, c3::Comonoid, more::Comonoid...;
 end
 
 # ============================================================
-# free_category_comonoid (Extensions v2, PR #14)
+# free_labeled_transition_comonoid (Extensions v0.3.x; v0.4 standalone)
 # ============================================================
 #
-# `free_category_comonoid(vertices, edges; max_depth)` builds the comonoid
-# corresponding to the free category on a directed graph. Convenience
-# wrapper over `from_category` that saves the user from constructing the
-# `SmallCategory` by hand.
+# `free_labeled_transition_comonoid(positions, edges; max_path_length)` builds
+# the comonoid corresponding to the free category on a labeled transition
+# graph. Canonical builder for `D` and `P_d` in the PolyCDS / Cat#-style
+# modeling pattern.
 #
-# Acyclic graphs: full free category. Every path is a distinct morphism;
+# Acyclic graphs: full free category. Every label-path is a distinct morphism;
 # composition is path concatenation; identity is the empty path.
 #
-# Cyclic graphs: the free category is genuinely infinite. Per Q14.2
-# (Extensions v2, 2026-05-01), this function takes a `max_depth` keyword
-# and returns the depth-bounded truncation, emitting an `@warn` so the
-# user knows the result is *not* a valid free comonoid (composites whose
-# path length exceeds `max_depth` are filled in with a sentinel — the
-# source identity — so the composition table stays total and downstream
-# code like `validate_comonoid` runs without crashing; the sentinels are
-# mathematically wrong, and `validate_comonoid` reports them as
-# category-law failures, which is the structural form of "this isn't a
-# valid free comonoid").
+# Cyclic graphs: the free category is genuinely infinite. The function takes
+# a `max_path_length` keyword and returns the depth-bounded truncation,
+# emitting an `@warn` so the user knows the result is *not* a valid free
+# comonoid (composites whose path length exceeds `max_path_length` are filled
+# in with a sentinel — the source identity — so the composition table stays
+# total and downstream code like `validate_comonoid` runs without crashing;
+# the sentinels are mathematically wrong, and `validate_comonoid` reports
+# them as category-law failures, which is the structural form of
+# "this isn't a valid free comonoid").
+#
+# History: this function generalizes the v0.3.0 `free_category_comonoid`
+# (PR #14, Extensions v2) with PolyCDS-aligned naming — "positions" instead
+# of "vertices", `(src, label, tgt)` edge shape, `max_path_length` keyword.
+# `free_category_comonoid` shipped as a deprecated forwarder in v0.3.1 and
+# was removed in v0.4.
 
 # Internal: detect a cycle in the directed graph via DFS with three colors.
 # Returns true if any cycle reachable from any vertex.
@@ -596,100 +601,93 @@ function _graph_has_cycle(vertices, out_edges::Dict)
     return false
 end
 
-# Internal: normalize a single edge into the canonical (src, tgt, label) form.
+# Internal: normalize an edge for the transition shape into (src, label, tgt).
 # Two-tuples auto-label by their position in the edges vector.
-function _normalize_edge(e, autolabel::Int)
+function _normalize_transition_edge(e, autolabel::Int)
     if e isa Tuple
         if length(e) == 2
-            return (e[1], e[2], autolabel)
+            return (e[1], autolabel, e[2])
         elseif length(e) == 3
             return (e[1], e[2], e[3])
         end
     end
-    error("free_category_comonoid: edge $e has unexpected shape; " *
-          "expected (src, tgt) or (src, tgt, label) tuple")
+    error("free_labeled_transition_comonoid: edge $e has unexpected shape; " *
+          "expected (src, tgt) or (src, label, tgt) tuple")
 end
 
 """
-    free_category_comonoid(vertices, edges; max_depth=nothing) -> Comonoid
+    free_labeled_transition_comonoid(positions, edges; max_path_length=nothing) -> Comonoid
 
-Build the comonoid corresponding to the free category on a directed graph.
+Build the comonoid corresponding to the free category on a labeled
+transition graph. Canonical builder for `D` and `P_d` in the
+PolyCDS / Cat#-style modeling pattern.
 
-  - `vertices` — an `AbstractVector` (or anything with `collect`-able
-    elements) of vertex labels.
-  - `edges` — a `Vector` of edge tuples. Each tuple is either
-    `(src, tgt)` (label auto-generated from position in the vector) or
-    `(src, tgt, label)` (user-supplied label). Mixing the two forms in
-    the same call is supported via per-edge dispatch on tuple arity.
-  - `max_depth` — optional `Int`. Required when the graph contains
-    cycles; ignored for acyclic graphs. Specifies the maximum path length
-    to include in the truncation.
+  - `positions` — an `AbstractVector` of position labels (vertices in
+    the underlying graph; objects of the resulting category).
+  - `edges` — a `Vector` of edge tuples in *(src, label, tgt)* shape
+    (labeled transition system convention). The two-tuple form
+    `(src, tgt)` is also accepted; missing labels are auto-generated
+    from the position of the edge in the vector.
+  - `max_path_length` — optional `Int`. Required when the graph
+    contains cycles; ignored for acyclic graphs. Caps the depth of
+    label-path concatenation.
 
 # Acyclic input
 
-Returns the full free category as a `Comonoid`. Morphisms are paths
-through the graph; identity at each vertex is the empty path; composition
-is path concatenation. The result passes [`validate_comonoid`](@ref).
+Returns the full free category as a `Comonoid`. Morphisms are
+label-paths through the graph; identity at each position is the empty
+path; composition is path concatenation. Passes
+[`validate_comonoid`](@ref).
 
 ```julia
-# Path: A → B → C
-free_category_comonoid([:A, :B, :C], [(:A, :B), (:B, :C)])
+# Two states, three transitions: pour, drink, refill
+free_labeled_transition_comonoid(
+    [:full, :empty],
+    [(:full, :drink, :empty), (:empty, :refill, :full), (:full, :pour, :empty)])
 ```
 
 # Cyclic input
 
 The free category on a cyclic graph is infinite, so this function
-truncates at `max_depth` and emits an `@warn`. **The truncated result
-is not a valid free comonoid:** composites whose path-length would
-exceed `max_depth` are filled in with a *sentinel* — the source identity
-at the relevant domain — so the composition table stays total and
-[`validate_comonoid`](@ref) runs cleanly rather than throwing. Because
-the sentinels are mathematically wrong, validation returns `false` and
-reports the category-law failures (typically associativity and identity
-violations on the sentinel rows). The warning is the user's signal that
-the truncation is in effect; the validation failures are the structural
-manifestation of the same fact.
+truncates at `max_path_length` and emits an `@warn`. **The truncated
+result is not a valid free comonoid:** composites whose label-path
+length would exceed `max_path_length` are filled with a sentinel (the
+source identity), so the composition table stays total and
+[`validate_comonoid`](@ref) runs cleanly rather than throwing — but
+the sentinels register as category-law violations, which is the
+structural manifestation of "this isn't a valid free comonoid."
 
 ```julia
-# Cyclic: A → B → A
-free_category_comonoid([:A, :B], [(:A, :B), (:B, :A)]; max_depth=3)
-# @warn: graph contains cycles; returning depth-bounded truncation...
+# Cyclic transition: full → empty → full
+free_labeled_transition_comonoid([:full, :empty],
+                                 [(:full, :drink, :empty),
+                                  (:empty, :refill, :full)];
+                                 max_path_length=3)
 ```
-
-For users who want the full lazy infinite version, the planned `LazyCofreeComonoid`
-work (Extensions v2 #8) is the right tool once it lands.
 
 # Mixed labeled / unlabeled edges
 
 ```julia
-free_category_comonoid([:A, :B, :C],
-                       [(:A, :B, :forward),     # explicitly labeled
-                        (:B, :C),               # auto-labeled by position
-                        (:A, :C, :shortcut)])
+free_labeled_transition_comonoid([:A, :B, :C],
+                                 [(:A, :forward, :B),  # labeled
+                                  (:B, :C),            # auto-labeled by index
+                                  (:A, :shortcut, :C)])
 ```
+
+# Migration from `free_category_comonoid` (removed in v0.4)
+
+The v0.3.0 predecessor `free_category_comonoid(vertices, edges; max_depth)`
+took `(src, tgt, label)` edge shape and a `max_depth` keyword. To migrate:
+swap edge-tuple positions 2 and 3, and rename `max_depth` to
+`max_path_length`.
 """
-function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
-                                max_depth::Union{Int,Nothing}=nothing,
-                                _from_transition_shim::Bool=false)
-    # Extensions v0.3.x deprecation: `free_category_comonoid` is superseded
-    # by `free_labeled_transition_comonoid`. The new builder uses
-    # `(src, label, tgt)` edge shape (PolyCDS-aligned) and `max_path_length`
-    # keyword. Direct calls to this function get a depwarn; the new builder
-    # passes `_from_transition_shim=true` to suppress the warning when it
-    # delegates here. Removed in v0.4.
-    if !_from_transition_shim
-        Base.depwarn(
-            "`free_category_comonoid(vertices, edges; max_depth)` is " *
-            "deprecated as of v0.3.1; use " *
-            "`free_labeled_transition_comonoid(positions, edges; max_path_length)` " *
-            "instead. Edge-tuple shape changes from `(src, tgt, label)` to " *
-            "`(src, label, tgt)`. To be removed in v0.4.",
-            :free_category_comonoid)
-    end
-    # Deduplicate vertices; preserve order.
+function free_labeled_transition_comonoid(positions::AbstractVector,
+                                          edges::AbstractVector;
+                                          max_path_length::Union{Int,Nothing}=nothing)
+    # Deduplicate positions; preserve order.
     seen = Set{Any}()
     verts = Any[]
-    for v in vertices
+    for v in positions
         v in seen || (push!(seen, v); push!(verts, v))
     end
 
@@ -697,31 +695,31 @@ function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
     out_edges = Dict{Any,Vector{Tuple{Any,Any}}}(v => Tuple{Any,Any}[] for v in verts)
     edge_labels_seen = Dict{Any,Set{Any}}(v => Set{Any}() for v in verts)
     for (i, e) in enumerate(edges)
-        s, t, l = _normalize_edge(e, i)
-        s in seen || error("free_category_comonoid: edge source $s not in vertices")
-        t in seen || error("free_category_comonoid: edge target $t not in vertices")
+        s, l, t = _normalize_transition_edge(e, i)
+        s in seen || error("free_labeled_transition_comonoid: edge source $s not in positions")
+        t in seen || error("free_labeled_transition_comonoid: edge target $t not in positions")
         l in edge_labels_seen[s] &&
-            error("free_category_comonoid: duplicate edge label $l from vertex $s; " *
+            error("free_labeled_transition_comonoid: duplicate edge label $l from position $s; " *
                   "supply explicit unique labels for parallel edges")
         push!(edge_labels_seen[s], l)
         push!(out_edges[s], (l, t))
     end
 
-    # Cycle detection. Acyclic input: max_depth ignored. Cyclic + no
-    # max_depth: error. Cyclic + max_depth: warn and truncate.
+    # Cycle detection. Acyclic input: max_path_length ignored. Cyclic + no
+    # max_path_length: error. Cyclic + max_path_length: warn and truncate.
     has_cycle = _graph_has_cycle(verts, out_edges)
-    if has_cycle && max_depth === nothing
-        error("free_category_comonoid: graph contains cycles; supply `max_depth` " *
-              "to get a depth-bounded truncation, or remove the cycles")
+    if has_cycle && max_path_length === nothing
+        error("free_labeled_transition_comonoid: graph contains cycles; supply " *
+              "`max_path_length` to get a depth-bounded truncation, or remove the cycles")
     end
     if has_cycle
-        @warn "free_category_comonoid: graph contains cycles; returning depth-" *
-              "bounded truncation (paths up to length $max_depth). The result is " *
+        @warn "free_labeled_transition_comonoid: graph contains cycles; returning depth-" *
+              "bounded truncation (paths up to length $max_path_length). The result is " *
               "NOT a valid free comonoid — `validate_comonoid` will report " *
               "missing compositions. See the docstring for details."
     end
 
-    depth_bound = has_cycle ? max_depth : typemax(Int)
+    depth_bound = has_cycle ? max_path_length : typemax(Int)
 
     # Enumerate morphisms: a morphism is `(start_vertex, label_tuple)`
     # where the label tuple is the empty `()` for the identity, or a
@@ -730,7 +728,7 @@ function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
     morphism_dom = Dict{Any,Any}()
     morphism_cod = Dict{Any,Any}()
 
-    # Identity at each vertex.
+    # Identity at each position.
     for v in verts
         m = (v, ())
         push!(morphisms, m)
@@ -795,125 +793,6 @@ function free_category_comonoid(vertices::AbstractVector, edges::AbstractVector;
     cat = SmallCategory(FinPolySet(verts), morphisms_set,
                         morphism_dom, morphism_cod, morphism_identity, composition)
     from_category(cat)
-end
-
-# ============================================================
-# free_labeled_transition_comonoid (Extensions v0.3.x)
-# ============================================================
-#
-# Generalizes `free_category_comonoid` (PR #14, v0.3.0) and PolyCDS's
-# hand-rolled `as_protocol_smallcategory`. Same underlying free-category
-# construction, with PolyCDS-aligned naming:
-#
-#   * "positions" instead of "vertices" — fits the polynomial-theoretic
-#     vocabulary of carriers.
-#   * Edges as `(src, label, tgt)` triples (labeled transition system
-#     shape) — matches PolyCDS conventions. Two-tuple `(src, tgt)` is
-#     also accepted for ergonomics; auto-labels by edge index.
-#   * `max_path_length` keyword (was `max_depth`) — same semantics.
-#
-# `free_category_comonoid` is preserved as a deprecated shim through
-# v0.4 (depwarn forwarder; argument-order swap from `(src, tgt, label)`
-# to `(src, label, tgt)` and keyword translation handled internally).
-
-# Internal: normalize an edge for the transition shape into (src, label, tgt).
-# Two-tuples auto-label by their position in the edges vector.
-function _normalize_transition_edge(e, autolabel::Int)
-    if e isa Tuple
-        if length(e) == 2
-            return (e[1], autolabel, e[2])
-        elseif length(e) == 3
-            return (e[1], e[2], e[3])
-        end
-    end
-    error("free_labeled_transition_comonoid: edge $e has unexpected shape; " *
-          "expected (src, tgt) or (src, label, tgt) tuple")
-end
-
-"""
-    free_labeled_transition_comonoid(positions, edges; max_path_length=nothing) -> Comonoid
-
-Build the comonoid corresponding to the free category on a labeled
-transition graph. Canonical builder for `D` and `P_d` in the
-PolyCDS / Cat#-style modeling pattern; replaces both v0.3.0's
-`free_category_comonoid` and ad-hoc `as_protocol_smallcategory`-style
-builders.
-
-  - `positions` — an `AbstractVector` of position labels (vertices in
-    the underlying graph; objects of the resulting category).
-  - `edges` — a `Vector` of edge tuples in *(src, label, tgt)* shape
-    (labeled transition system convention). The two-tuple form
-    `(src, tgt)` is also accepted; missing labels are auto-generated
-    from the position of the edge in the vector.
-  - `max_path_length` — optional `Int`. Required when the graph
-    contains cycles; ignored for acyclic graphs. Caps the depth of
-    label-path concatenation.
-
-# Acyclic input
-
-Returns the full free category as a `Comonoid`. Morphisms are
-label-paths through the graph; identity at each position is the empty
-path; composition is path concatenation. Passes
-[`validate_comonoid`](@ref).
-
-```julia
-# Two states, three transitions: pour, drink, refill
-free_labeled_transition_comonoid(
-    [:full, :empty],
-    [(:full, :drink, :empty), (:empty, :refill, :full), (:full, :pour, :empty)])
-```
-
-# Cyclic input
-
-The free category on a cyclic graph is infinite, so this function
-truncates at `max_path_length` and emits an `@warn`. **The truncated
-result is not a valid free comonoid:** composites whose label-path
-length would exceed `max_path_length` are filled with a sentinel (the
-source identity), so the composition table stays total and
-[`validate_comonoid`](@ref) runs cleanly rather than throwing — but
-the sentinels register as category-law violations, which is the
-structural manifestation of "this isn't a valid free comonoid."
-
-```julia
-# Cyclic transition: full → empty → full
-free_labeled_transition_comonoid([:full, :empty],
-                                 [(:full, :drink, :empty),
-                                  (:empty, :refill, :full)];
-                                 max_path_length=3)
-```
-
-# Mixed labeled / unlabeled edges
-
-```julia
-free_labeled_transition_comonoid([:A, :B, :C],
-                                 [(:A, :forward, :B),  # labeled
-                                  (:B, :C),            # auto-labeled by index
-                                  (:A, :shortcut, :C)])
-```
-
-# Relation to `free_category_comonoid`
-
-`free_category_comonoid(vertices, edges; max_depth)` is the v0.3.0
-predecessor with `(src, tgt, label)` argument order and `max_depth`
-keyword. As of v0.3.1 it is deprecated and forwards to this function;
-removed in v0.4. Migration: swap edge-tuple positions 2 and 3, and
-rename `max_depth` to `max_path_length`.
-"""
-function free_labeled_transition_comonoid(positions::AbstractVector,
-                                          edges::AbstractVector;
-                                          max_path_length::Union{Int,Nothing}=nothing)
-    # Translate (src, label, tgt) edges into (src, tgt, label) shape and
-    # delegate to the underlying free-category builder. We keep
-    # `free_category_comonoid`'s core BFS/cycle logic; this function is
-    # a renaming + edge-tuple-shape adapter.
-    normalized_edges = Tuple[]
-    for (i, e) in enumerate(edges)
-        s, l, t = _normalize_transition_edge(e, i)
-        push!(normalized_edges, (s, t, l))
-    end
-    free_category_comonoid(positions, normalized_edges;
-                           max_depth=max_path_length,
-                           _from_transition_shim=true)
 end
 
 # ============================================================
@@ -1312,11 +1191,165 @@ function monoid_comonoid(M::PolySet, e, op::Function)
 end
 
 # ============================================================
+# comonoid_from_coclosure — Example 5.5 (v0.6.1)
+# ============================================================
+#
+# Spivak/Garner/Fairbanks Example 5.5 (also called the "full internal
+# subcategory spanned by p"): for any p ∈ Poly, the coclosure
+# `[p/p]` carries a natural comonoid structure, with category-side
+# semantics
+#
+#     objects                  = p(1)
+#     morphisms out of i       = pairs (i', f) with i' ∈ p(1)
+#                                and f : p[i'] → p[i]
+#     identity at i            = (i, id_{p[i]})
+#     codomain of (i', f)      = i'
+#     composite of (i', f) and (i'', f') = (i'', f ∘ f')
+#                                where (f ∘ f')(d'') = f(f'(d''))
+#
+# The fully-faithful functor `[p/p] → Set^op` sending i ↦ p[i] embeds
+# `[p/p]` as a full subcategory of `Set^op`. The opposite category is
+# the **full internal subcategory spanned by p** — see paper for the
+# subtlety about whether p has duplicate direction-sets.
+#
+# Lemma 8.7 specializes this to p = u (the list polynomial): `[u/u]` as
+# a category is a skeleton of Fin^op. Concretely, for the truncated
+# `u_K = list_polynomial(max_size=K)`, `comonoid_from_coclosure(u_K)` is
+# (a finite truncation of) Fin^op restricted to objects {0, ..., K} with
+# Fin morphisms among them.
+#
+# v0.6.1 ships only the **finite** case — `coclosure(p, p)` requires
+# FinPolySet positions and direction-sets of p (see `coclosure`'s
+# v0.6.1 caveat). The infinite-positions case (Lemma 8.7's full
+# `[u/u] ≅ Fin^op`) is deferred to v0.7 with the symbolic-positions
+# pass.
+
+"""
+    comonoid_from_coclosure(p::Polynomial) -> Comonoid
+
+The natural comonoid on `[p/p]` from Spivak/Garner/Fairbanks
+**Example 5.5**: positions of `[p/p]` are `p(1)`, and morphisms out of
+`i ∈ p(1)` are pairs `(i', f)` with `i' ∈ p(1)` and `f : p[i'] → p[i]`,
+with composition by composing the underlying maps of direction-sets.
+
+Categorically: this presents the **opposite of the full internal
+subcategory spanned by `p`** — equivalently, the full subcategory of
+`Set^op` whose objects are the direction-sets `{p[i] : i ∈ p(1)}`.
+
+# Specialization to the list polynomial (Lemma 8.7)
+
+For `p = list_polynomial(max_size=K)` (the truncation `u_K = Σ_{N=0..K}
+y^N`), this constructs the finite truncation of `Fin^op` to objects
+`{0, ..., K}`. Morphisms `N → N'` correspond to functions `{1,...,N'}
+→ {1,...,N}`. See [`comonoid_from_list_polynomial`](@ref) for the
+named alias.
+
+# Comonoid structure
+
+  - **Carrier** `[p/p] = coclosure(p, p)`. Direction-set at `i` is
+    `apply(p, p[i])` — pairs `(j, g)` with `j ∈ p(1)` and
+    `g :: Dict` mapping `p[j].elements ↦ p[i].elements`.
+  - **Eraser** `ε : [p/p] → y`. At `i`, picks the identity direction
+    `(i, id_{p[i]}) :: (p(1), Dict(d => d for d ∈ p[i]))`.
+  - **Duplicator** `δ : [p/p] → [p/p] ◁ [p/p]`. On positions: `i ↦
+    (i, jbar)` where `jbar((j, g)) = j`. On directions, takes a
+    `([p/p] ◁ [p/p])`-direction `((j, g), (k, h))` at `i` (with
+    `(j, g) ∈ [p/p][i]` and `(k, h) ∈ [p/p][j]`) to the composite
+    `(k, g ∘ h) :: Dict(d_k => g[h[d_k]] for d_k ∈ p[k])`.
+
+# Finite case only (v0.6.1)
+
+Inherits the v0.6.1 finiteness restriction from [`coclosure`](@ref):
+both `p.positions` and every `p[i]` must be `FinPolySet`. The
+`max_size`-truncated [`list_polynomial`](@ref) satisfies this; the
+unbounded `list_polynomial()` does not (`NatSet()` positions). v0.7's
+symbolic-positions pass will lift the restriction.
+
+# Validation
+
+`validate_comonoid(comonoid_from_coclosure(p))` should hold for any
+finite `p`. The category-side check (`to_category` then
+`validate_category_laws`) verifies counit (identity is a left/right
+unit for composition) and coassociativity (composition of three
+morphisms is associative).
+
+See also: [`coclosure`](@ref), [`comonoid_from_list_polynomial`](@ref).
+"""
+function comonoid_from_coclosure(p::Polynomial)
+    pp = p.positions
+    pp isa FinPolySet ||
+        error("comonoid_from_coclosure: p.positions is $(typeof(pp)); " *
+              "v0.6.1 supports FinPolySet only. v0.7 will install the " *
+              "symbolic / NatSet path needed for full Lemma 8.7.")
+    for i in pp.elements
+        Di = direction_at(p, i)
+        Di isa FinPolySet ||
+            error("comonoid_from_coclosure: p[$i] is $(typeof(Di)); " *
+                  "v0.6.1 needs FinPolySet at every position.")
+    end
+
+    # Carrier: [p/p] per Prop 2.16. Positions = p(1); direction-set at
+    # i = apply(p, p[i]) — pairs (j, g) with g : p[j] → p[i].
+    carrier = coclosure(p, p)
+
+    # ---- Eraser ε : [p/p] → y ----
+    # On positions: every i ↦ :pt (forced).
+    # On directions: at i, the unique y-direction :pt maps to the
+    # identity morphism (i, id_{p[i]}) ∈ [p/p][i].
+    eraser_on_pos = _ -> :pt
+    eraser_on_dir = (i, _b) -> begin
+        Di = direction_at(p, i)::FinPolySet
+        # Identity on p[i]: Dict mapping each direction to itself.
+        id_pi = Dict{Any,Any}(d => d for d in Di.elements)
+        (i, id_pi)
+    end
+    eraser = Lens(carrier, y, eraser_on_pos, eraser_on_dir)
+
+    # ---- Duplicator δ : [p/p] → [p/p] ◁ [p/p] ----
+    # On positions: i ↦ (i, jbar) where jbar((j, g)) = j (the codomain
+    # of morphism (j, g)).
+    dup_on_pos = i -> begin
+        Ci = direction_at(carrier, i)::FinPolySet
+        # Build jbar as Dict: each direction (j, g) at i maps to its
+        # codomain j, which sits in p(1) = positions of carrier.
+        jbar = Dict{Any,Any}(jg => jg[1] for jg in Ci.elements)
+        (i, jbar)
+    end
+    # On directions: at i, take a ([p/p] ◁ [p/p])-direction (jg, kh)
+    # where jg = (j, g : p[j] → p[i]) and kh = (k, h : p[k] → p[j]).
+    # Returns the composite morphism (k, g ∘ h) ∈ [p/p][i] —
+    # g ∘ h : p[k] → p[i] is `d_k ↦ g[h[d_k]]`.
+    dup_on_dir = (i, ab) -> begin
+        jg, kh = ab
+        j, g = jg
+        k, h = kh
+        Dk = direction_at(p, k)::FinPolySet
+        composed = Dict{Any,Any}(d_k => g[h[d_k]] for d_k in Dk.elements)
+        (k, composed)
+    end
+
+    # Lazy cod via subst_targeted_lens to avoid materializing
+    # subst(carrier, carrier) — which would enumerate
+    # Σ_i |carrier[i]|^|carrier[i]| jbar dicts.
+    duplicator = subst_targeted_lens(carrier, carrier, carrier,
+                                     dup_on_pos,
+                                     # subst_targeted_lens's on_dir
+                                     # callback receives (x, a, b)
+                                     # rather than (x, ab); adapt by
+                                     # forwarding to dup_on_dir's
+                                     # tuple-shape input.
+                                     (i, a, b) -> dup_on_dir(i, (a, b)))
+
+    Comonoid(carrier, eraser, duplicator)
+end
+
+# ============================================================
 # Retrofunctors — morphisms of comonoids = functors
 # ============================================================
 
 """
-    Retrofunctor(dom::Comonoid, cod::Comonoid, underlying::Lens)
+    Retrofunctor(dom::Comonoid, cod::Comonoid, underlying::Lens;
+                 forward_on_directions::Union{Function,Nothing}=nothing)
 
 A *retrofunctor* from one comonoid to another: a `Lens` between the
 underlying carriers that is also a comonoid morphism. Per Ahman–Uustalu,
@@ -1324,17 +1357,46 @@ these are exactly *functors* between the corresponding categories.
 
 The functor laws (counit and comultiplication preservation) are *not*
 verified at construction — call [`validate_retrofunctor`](@ref).
+
+# Forward direction action (v0.4.x patch)
+
+A functor `F : C → D` has two natural direction actions:
+
+  - **Backward** (always stored, in `underlying.on_directions`): at each
+    `c0 ∈ dom-positions`, given a cod-direction at `F(c0)`, return the
+    corresponding dom-direction. Total only when `F`'s image is the full
+    codomain — partial otherwise.
+  - **Forward** (optional, in `forward_on_directions`): at each
+    `c0 ∈ dom-positions`, given a dom-direction at `c0`, return the
+    corresponding cod-direction at `F(c0)`. Total whenever the
+    constructor can compute it canonically (e.g. `cofree_morphism`'s
+    forward is a filter-subsequence; `tuple_retrofunctor`'s forward is
+    the per-component tuple).
+
+`forward_on_directions` is a curried function: calling it with a
+`dom`-position `c0_pos` returns a value whose `.f(b_0)` returns the
+cod-direction at `F.on_positions(c0_pos)` corresponding to the
+dom-direction `b_0` (mirroring the back-action's
+`underlying.on_directions.f(c0_pos).f(b_C)` shape). When `nothing`,
+callers (such as [`base_change_left`](@ref)) fall back to inverting
+the back-action; when set, callers iterate `dom`-directions forward
+without inverting — handling partial-image retrofunctors that the
+back-action-inversion path can't.
+
+Existing callers ignoring the field continue to work unchanged.
 """
 struct Retrofunctor
     dom::Comonoid
     cod::Comonoid
     underlying::Lens
-    function Retrofunctor(dom::Comonoid, cod::Comonoid, underlying::Lens)
+    forward_on_directions::Union{Function,Nothing}
+    function Retrofunctor(dom::Comonoid, cod::Comonoid, underlying::Lens;
+                          forward_on_directions::Union{Function,Nothing}=nothing)
         underlying.dom == dom.carrier ||
             error("Retrofunctor: underlying.dom ≠ dom.carrier")
         underlying.cod == cod.carrier ||
             error("Retrofunctor: underlying.cod ≠ cod.carrier")
-        new(dom, cod, underlying)
+        new(dom, cod, underlying, forward_on_directions)
     end
 end
 
@@ -1349,20 +1411,183 @@ end
 """
     identity_retrofunctor(c::Comonoid) -> Retrofunctor
 
-The identity retrofunctor `id_c : c → c`.
+The identity retrofunctor `id_c : c → c`. Has both the back-action
+(via `identity_lens`) and the canonical forward-action (also identity)
+populated.
 """
 identity_retrofunctor(c::Comonoid) =
-    Retrofunctor(c, c, identity_lens(c.carrier))
+    Retrofunctor(c, c, identity_lens(c.carrier);
+                 forward_on_directions = _c0 -> (; f = b_0 -> b_0))
 
 """
     compose(F::Retrofunctor, G::Retrofunctor) -> Retrofunctor
 
 Compose two retrofunctors. `F : c → d`, `G : d → e` give `F ; G : c → e`.
+
+If both `F` and `G` carry a forward-direction action, the composite's
+forward action is the corresponding composite (forward-then-forward).
+If either is `nothing`, the composite leaves it `nothing`.
 """
 function compose(F::Retrofunctor, G::Retrofunctor)
     F.cod === G.dom || F.cod.carrier == G.dom.carrier ||
         error("Cannot compose retrofunctors: F.cod ≠ G.dom")
-    Retrofunctor(F.dom, G.cod, compose(F.underlying, G.underlying))
+    forward = if F.forward_on_directions !== nothing &&
+                 G.forward_on_directions !== nothing
+        F_pos = F.underlying.on_positions.f
+        f_fwd = F.forward_on_directions
+        g_fwd = G.forward_on_directions
+        c0 -> begin
+            f_at = f_fwd(c0)
+            g_at = g_fwd(F_pos(c0))
+            (; f = b_0 -> g_at.f(f_at.f(b_0)))
+        end
+    else
+        nothing
+    end
+    Retrofunctor(F.dom, G.cod, compose(F.underlying, G.underlying);
+                 forward_on_directions = forward)
+end
+
+# ============================================================
+# tuple_retrofunctor — universal arrow into a carrier-tensor of comonoids
+# (v0.4.x #5 part 4)
+# ============================================================
+#
+# Given `F_d : C → D_d` (Retrofunctors sharing source comonoid `C`),
+# build the unique Retrofunctor `⟨F_d⟩ : C → ⊗_d D_d` where ⊗ is the
+# carrier-tensor (`_comonoid_carrier_tensor` from Cofree.jl).
+#
+# Tuple-shape note: `reduce(⊗, [D_1, ..., D_n])` left-folds, so
+# positions/directions in the tensored comonoid are nested left-fold
+# tuples — for n=3, positions look like `((p_1, p_2), p_3)` rather
+# than `(p_1, p_2, p_3)`. The on_positions / on_directions functions
+# below construct and decompose with that nesting in mind.
+#
+# Agreement check: when lifting a tensored direction's components back
+# to a single C-direction, the F_d's must agree element-wise. If they
+# don't, the Fs aren't a compatible family for the universal property
+# and the function errors with a clear message. Use `validate=false`
+# to skip the check (caller's responsibility to ensure compatibility).
+
+# Internal: build the nested left-fold tuple from a vector of leaves.
+# `[a]` → `a`; `[a, b]` → `(a, b)`; `[a, b, c]` → `((a, b), c)`; etc.
+function _left_fold_tuple(leaves::AbstractVector)
+    isempty(leaves) && error("_left_fold_tuple: empty vector")
+    length(leaves) == 1 && return leaves[1]
+    acc = (leaves[1], leaves[2])
+    for i in 3:length(leaves)
+        acc = (acc, leaves[i])
+    end
+    acc
+end
+
+# Internal: decompose a left-fold-nested tuple into its n leaves in
+# original order. Inverse of `_left_fold_tuple`.
+function _decompose_left_fold(t, n::Int)
+    n ≥ 1 || error("_decompose_left_fold: n must be ≥ 1; got $n")
+    n == 1 && return [t]
+    rest, last = t
+    return [_decompose_left_fold(rest, n-1)..., last]
+end
+
+"""
+    tuple_retrofunctor(Fs::Vector{Retrofunctor}; validate::Bool=true) -> Retrofunctor
+
+Universal arrow into the carrier-tensor of a family of comonoids. Given
+retrofunctors `F_d : C → D_d` (all sharing the same domain comonoid by
+`===` on `F.dom`), build the unique retrofunctor
+`⟨F_d⟩ : C → ⊗_d D_d` where `⊗` is the carrier-tensor on comonoids
+(internally `_comonoid_carrier_tensor`, the same one
+`parallel(::Bicomodule, ::Bicomodule)` uses for its bases).
+
+# Construction
+
+  - On positions: `x ↦ (F_1(x), F_2(x), …, F_n(x))` packed as a
+    left-folded nested tuple (matching `reduce(⊗, …)`'s output shape).
+  - On directions: a tensored direction at `⟨F_d⟩(x)` is a tuple
+    `(b_1, …, b_n)` (also left-folded). Lift each `b_d` via
+    `F_d.on_directions(x)` to get a `C`-direction. By the universal
+    property, all components agree on a single `C`-direction; we
+    return that common value.
+
+# Agreement check
+
+When `validate=true` (default), the on-directions function checks that
+the per-component lifts agree and errors clearly otherwise — this is
+the runtime witness that `Fs` is a compatible family. Pass
+`validate=false` for hot paths where the caller has independently
+verified compatibility.
+
+# Strict validation
+
+If each `F_d` strict-validates and the agreement check passes, the
+result strict-validates as a Retrofunctor.
+
+# Errors
+
+  - Empty `Fs` vector.
+  - Domains not all `===`-equal.
+  - With `validate=true`, components disagree on a direction lift at
+    runtime.
+"""
+function tuple_retrofunctor(Fs::AbstractVector{Retrofunctor}; validate::Bool=true)
+    isempty(Fs) && error("tuple_retrofunctor: empty Fs vector")
+    C = Fs[1].dom
+    # Domain check: prefer `===` for the fast/exact case, but fall back to
+    # structural carrier equality so callers that build per-F comonoids
+    # via `cofree_comonoid` / `cofree_morphism` (which produces fresh-but-
+    # structurally-equal comonoids per call) don't get spurious mismatches.
+    all(F -> F.dom === C || F.dom.carrier == C.carrier, Fs) ||
+        error("tuple_retrofunctor: all Fs must share their .dom (either by `===` " *
+              "or structural carrier equality); got mismatch")
+
+    n = length(Fs)
+    # 1-element shortcut: tuple_retrofunctor([F]) ≅ F.
+    n == 1 && return Fs[1]
+
+    D_tensored = reduce(_comonoid_carrier_tensor, [F.cod for F in Fs])
+
+    on_positions = x -> begin
+        leaves = [F.underlying.on_positions.f(x) for F in Fs]
+        _left_fold_tuple(leaves)
+    end
+
+    on_directions = (x, tensored_dir) -> begin
+        components = _decompose_left_fold(tensored_dir, n)
+        lifted = [Fs[i].underlying.on_directions.f(x).f(components[i]) for i in 1:n]
+        if validate
+            first_val = lifted[1]
+            for i in 2:n
+                lifted[i] == first_val ||
+                    error("tuple_retrofunctor: components disagree on direction lift " *
+                          "at x=$x, tensored_dir=$tensored_dir — Fs[$i] gives " *
+                          "$(lifted[i]) but Fs[1] gives $first_val. The Fs are not a " *
+                          "compatible family.")
+            end
+        end
+        lifted[1]
+    end
+
+    underlying = Lens(C.carrier, D_tensored.carrier, on_positions, on_directions)
+
+    # Forward-direction action: when every component carries one, the
+    # tuple's forward at C-position `x` and a single C-direction `b` is
+    # the per-component tuple `(F_1.forward(x).f(b), …, F_n.forward(x).f(b))`,
+    # packed as the same left-fold nesting `on_positions` uses for
+    # tensored positions. No agreement check needed — packing is total
+    # by construction.
+    forward = if all(F -> F.forward_on_directions !== nothing, Fs)
+        fwds = [F.forward_on_directions for F in Fs]
+        x -> begin
+            per_at = [fwds[i](x) for i in 1:n]
+            (; f = b -> _left_fold_tuple([per_at[i].f(b) for i in 1:n]))
+        end
+    else
+        nothing
+    end
+
+    Retrofunctor(C, D_tensored, underlying;
+                 forward_on_directions = forward)
 end
 
 """
@@ -1385,6 +1610,19 @@ a strict comonoid morphism from a comonoid with non-trivial walks; that's
 a property of the truncation, not a `Lens ==` quirk. Verify the universal
 property of `cofree_universal` directly via
 `compose(F.underlying, cofree_unit(p, d))` versus the original labeling.
+
+**Note:** neither mode passes on **partial-image retrofunctors** —
+those whose back-action `F.underlying.on_directions` is undefined on
+non-image cod-directions. Examples: [`tuple_retrofunctor`](@ref) of a
+non-trivial compatible family, and [`cofree_morphism`](@ref) over a
+non-identity boundary lens. Both modes here probe `on_directions` on
+every cod-direction and will error or return `false` for a structurally
+correct retrofunctor. For these constructions use
+[`validate_retrofunctor_forward`](@ref), which checks the same
+comonoid-morphism axioms via `F.forward_on_directions`. The dispatch
+mirrors [`base_change_left`](@ref)'s forward-action patch: if the
+retrofunctor carries `forward_on_directions`, `*_forward` is the
+applicable validator.
 
 With `verbose=true`, prints which axiom failed first.
 """
@@ -1492,6 +1730,235 @@ function validate_retrofunctor_detailed(F::Retrofunctor; strict::Bool=true,
 end
 
 # ============================================================
+# validate_retrofunctor_forward — forward-action variant (v0.5)
+# ============================================================
+#
+# Spec: PolyCDS v1.7 iso test continuation, 2026-05-02. Mirrors the
+# v0.4.x forward-action patch on `base_change_left` / `base_change_right`,
+# but for self-validation rather than Cat# operations.
+#
+# `validate_retrofunctor` (strict and element-wise) evaluates
+# `F.underlying.on_directions` on every cod-direction. Retrofunctors
+# whose image is a proper subcategory of `F.cod` — the partial-image
+# pattern produced by `tuple_retrofunctor` of cofree morphisms over
+# non-identity boundary lenses (and similar diagonal-image constructions)
+# — have a back-action that is undefined on non-image directions and
+# either errors or returns garbage when probed there. This validator
+# checks the same comonoid-morphism axioms via the *forward* action,
+# never touching `on_directions`. Categorically the same statement;
+# different witness.
+
+"""
+    validate_retrofunctor_forward(F::Retrofunctor; verbose=false) -> Bool
+
+Check the comonoid-morphism axioms element-wise on the **forward**
+direction action `F.forward_on_directions`, never evaluating
+`F.underlying.on_directions`.
+
+This is the validator for **partial-image retrofunctors** — those whose
+back-action on cod-directions is defined only on the image of the
+forward action. Examples: retrofunctors built by [`tuple_retrofunctor`](@ref)
+over a non-trivial compatible family (the components disagree on
+non-image direction tuples by design) and [`cofree_morphism`](@ref)s
+over a non-identity boundary lens (the back-action is the inclusion's
+preimage, partial). Such retrofunctors are usable in
+[`base_change_left`](@ref) / [`base_change_right`](@ref) (which already
+dispatch on `forward_on_directions`), but cannot pass
+[`validate_retrofunctor`](@ref) because both its strict and element-wise
+modes probe `on_directions` on every cod-direction.
+
+# Requirements
+
+  - `F.forward_on_directions !== nothing` (errors otherwise — falls back
+    to `validate_retrofunctor(F)` for back-action retrofunctors).
+  - `F.dom.carrier.positions isa FinPolySet` (finite enumeration; the
+    same precondition as the existing element-wise validator).
+
+# Laws checked (forward form)
+
+For every `c0 ∈ dom-positions`, letting `Fc0 = F(c0)`:
+
+  - **Counit preservation.** `F.forward(c0).f(id_dom_at_c0) ==
+    id_cod_at_Fc0`, where `id_*_at_x = (eraser).on_directions.f(x).f(:pt)`.
+
+For every `(c0, b, b')` with `b ∈ dom-directions[c0]`,
+`c0' = jbar^{dom.dup}(c0)[b]`, and `b' ∈ dom-directions[c0']`:
+
+  - **Comult preservation (forward composition law).** `F.forward`
+    respects dom-composition by sending it to cod-composition:
+    `F.forward(c0).f(dom.dup.on_directions.f(c0).f((b, b'))) ==
+     cod.dup.on_directions.f(Fc0).f((F.forward(c0).f(b),
+                                     F.forward(c0').f(b')))`.
+    For cofree comonoids this is "forward respects path concatenation"
+    — the property that makes `cofree_morphism`'s filter-subsequence a
+    well-defined retrofunctor's morphism action.
+
+# Why counit + composition only (no position-side check)
+
+A naive forward translation of comult would also check that
+`F(c0') == jbar^{cod.dup}(Fc0)[F.forward(c0).f(b)]` (the dom-codomain
+of `b` images to the cod-codomain of `F.forward(b)`). That equation
+**does not hold** for `cofree_morphism(L, depth)` over a non-identity
+alphabet-inclusion `L`, even though `cofree_morphism` strict-validates
+as a back-action retrofunctor. When `b` is a dom-direction outside L's
+image (e.g., `(:c,)` in `{:a,:b}`-inclusion), the forward filters it
+to the identity cod-direction `()`, whose cod-codomain is `Fc0` itself
+— but `F(c0')` is a strictly deeper subtree. The strict back-action
+laws still hold there (the back-action lifts cod-directions to
+dom-directions, and that lift is total).
+
+So the position-side equation is not an invariant of valid
+retrofunctors, only of those whose forward action is the morphism
+action of a *strict* functor with bijective direction routing.
+Counit + composition law is what's actually invariant.
+
+These two laws are jointly enough to witness functoriality of the
+forward action. They do **not** imply the strict back-action laws (which
+constrain `F.on_directions` on every cod-direction); for those, use
+`validate_retrofunctor`. Conversely, a partial-image retrofunctor like
+`tuple_retrofunctor` of cofree-morphisms over distinct alphabet
+inclusions can satisfy these laws without `F.on_directions` being a
+total well-defined function — exactly the case this validator targets.
+
+# Verbose mode
+
+`verbose=true` prints the first failure's structural hint;
+`verbose=:all` collects every failure into the returned `ValidationResult`.
+
+# When to use which validator
+
+  - `validate_retrofunctor(F; strict=true|false)`: total back-action
+    retrofunctors (identity, free composition, full surjections). The
+    strictest test — both axioms checked as full lens equations or
+    element-wise on `on_directions`.
+  - `validate_retrofunctor_forward(F)`: any retrofunctor with a
+    populated `forward_on_directions`. Mandatory for partial-image
+    retrofunctors. Logically the same axioms.
+
+# See also
+`validate_retrofunctor`, `validate_retrofunctor_forward_detailed`,
+`base_change_left` (which already dispatches on `forward_on_directions`).
+"""
+validate_retrofunctor_forward(F::Retrofunctor;
+                               verbose::Union{Bool,Symbol}=false) =
+    validate_retrofunctor_forward_detailed(F; verbose=verbose).passed
+
+"""
+    validate_retrofunctor_forward_detailed(F::Retrofunctor; verbose=false) -> ValidationResult
+
+Same checks as [`validate_retrofunctor_forward`](@ref), but returns the
+full `ValidationResult` with structural failure information (per-failure
+`law`, `location`, `structural_hint`, `actual`, `expected`).
+"""
+function validate_retrofunctor_forward_detailed(F::Retrofunctor;
+                                                 verbose::Union{Bool,Symbol}=false)
+    F.forward_on_directions !== nothing ||
+        error("validate_retrofunctor_forward: F.forward_on_directions is `nothing`. " *
+              "This validator requires a populated forward action; for retrofunctors " *
+              "without one, use `validate_retrofunctor(F)` instead.")
+
+    cdom = F.dom.carrier
+    pp = cdom.positions
+    pp isa FinPolySet ||
+        error("validate_retrofunctor_forward: requires F.dom.carrier.positions to be " *
+              "FinPolySet (finite-position dom). For non-finite dom-positions there is " *
+              "no element-wise validator.")
+
+    failures = ValidationFailure[]
+    collect_all = (verbose === :all)
+    function record!(f::ValidationFailure)
+        push!(failures, f)
+        verbose === true && println("Retrofunctor (forward) violation: ", f.structural_hint)
+        return collect_all
+    end
+
+    F_pos = F.underlying.on_positions.f
+    F_fwd = F.forward_on_directions
+
+    # ---- Counit preservation (forward form) ----
+    for c0 in pp.elements
+        Fc0 = F_pos(c0)
+        id_dom = F.dom.eraser.on_directions.f(c0).f(:pt)
+        id_cod = F.cod.eraser.on_directions.f(Fc0).f(:pt)
+        via_fwd = F_fwd(c0).f(id_dom)
+        if via_fwd != id_cod
+            failure = ValidationFailure(
+                :counit_preservation_forward, (c0,),
+                "counit preservation (forward) at $c0: F.forward($c0).f(id_dom=$id_dom) " *
+                "gives $via_fwd, but id_cod at F($c0)=$Fc0 is $id_cod — F.forward " *
+                "disagrees with the comonoids' eraser identifications",
+                via_fwd, id_cod)
+            record!(failure) || return fail(failures)
+        end
+    end
+
+    # ---- Comult preservation (forward form, composition law) ----
+    #
+    # Why direction-side only and not position-side:
+    #
+    # The "naive" forward translation of comult would also check
+    # `F(c0_prime) == jbar_cod(Fc0)[F.forward(c0)(b)]`, where
+    # `c0_prime = jbar_dom(c0)[b]`. That check FAILS on partial-image
+    # retrofunctors that are nonetheless valid back-action comonoid
+    # morphisms — e.g., `cofree_morphism(L, depth)` over a non-identity
+    # alphabet-inclusion L. There, a dom-direction outside L's image is
+    # filtered to the identity cod-direction `()`, whose cod-codomain
+    # is `Fc0` itself — but `F(c0_prime)` is a strictly deeper subtree.
+    # The strict back-action laws still hold (per `cofree_morphism`'s
+    # docstring), so the position-side equation does NOT characterize
+    # forward-action correctness.
+    #
+    # What DOES characterize correctness via forward data is the
+    # composition law: `F.forward` respects dom-composition by sending
+    # it to cod-composition, where cod-composition for cofree comonoids
+    # is path concatenation (a total operation, independent of
+    # position-side targets). For tensor cod-comonoids it's
+    # componentwise concatenation. This is the law verified below;
+    # it's exactly the "filter respects concatenation" property of
+    # `cofree_morphism`'s filter-subsequence forward, lifted to a
+    # generic statement about any populated `forward_on_directions`.
+    #
+    # Counit + direction-side comult are jointly enough to witness
+    # functoriality of the forward action. They do not imply the strict
+    # back-action laws (which constrain `F.on_directions` on every
+    # cod-direction); for that, use `validate_retrofunctor`.
+    for c0 in pp.elements
+        Fc0 = F_pos(c0)
+        D_dom_at_c0 = direction_at(cdom, c0)::FinPolySet
+        # `dup.on_positions.f(x)` returns `(x, jbar)` where
+        # `jbar[a] = codomain of morphism a at x`.
+        dom_jbar = F.dom.duplicator.on_positions.f(c0)[2]
+        F_fwd_at_c0 = F_fwd(c0)
+
+        for b in D_dom_at_c0.elements
+            # `b` is a dom-direction at c0 — a morphism c0 → c0_prime.
+            c0_prime = dom_jbar[b]
+            a = F_fwd_at_c0.f(b)
+            D_dom_at_c0_prime = direction_at(cdom, c0_prime)::FinPolySet
+            F_fwd_at_c0_prime = F_fwd(c0_prime)
+            for b_prime in D_dom_at_c0_prime.elements
+                a_prime = F_fwd_at_c0_prime.f(b_prime)
+                composed_dom = F.dom.duplicator.on_directions.f(c0).f((b, b_prime))
+                lhs = F_fwd_at_c0.f(composed_dom)
+                rhs = F.cod.duplicator.on_directions.f(Fc0).f((a, a_prime))
+                if lhs != rhs
+                    failure = ValidationFailure(
+                        :comult_forward, (c0, b, b_prime),
+                        "comult preservation (forward composition) at ($c0, $b, $b_prime): " *
+                        "F.forward(b ; b') gives $lhs but cod-composition of " *
+                        "(F.forward(b)=$a) ; (F.forward(b')=$a_prime) gives $rhs — " *
+                        "F.forward does not respect dom-composition.",
+                        lhs, rhs)
+                    record!(failure) || return fail(failures)
+                end
+            end
+        end
+    end
+
+    isempty(failures) ? pass("retrofunctor (forward element-wise)") : fail(failures)
+end
+
+# ============================================================
 # comonoid_from_data (Extensions v2 PR #5)
 # ============================================================
 #
@@ -1557,4 +2024,89 @@ function comonoid_from_data(carrier::Polynomial;
             "; pass `validate=false` to skip."))
     end
     result
+end
+
+# ============================================================
+# Comonoid ergonomics — categorical-style accessors (v0.5.1)
+# ============================================================
+#
+# Wrappers around `direction_at` and `c.duplicator.on_positions` that read
+# more naturally when the caller is thinking in categorical terms ("morphisms
+# out of `a`", "codomain of `f`") rather than polynomial terms ("directions
+# at position `a`", "duplicator's on-positions image"). PolyAggregation.jl's
+# `aggregate(inst)` walks the morphisms of `c` and applies aggregator
+# restrictions along each — these accessors keep the walk readable.
+#
+# Pure renames of existing API; no new behavior.
+
+"""
+    morphisms_out_of(c::Comonoid, a) -> Vector
+
+The list of all morphisms `f` of `c` with `dom(f) == a`, including the
+identity. Each morphism is returned in the same shape as `c[a]`'s elements
+(i.e., as direction-positions of the carrier — for example, in a free
+category on a labeled transition graph, the empty path `()` for the
+identity and label-tuples like `(:f,)` for non-identity morphisms).
+
+Equivalent to `collect(direction_at(c.carrier, a).elements)` when the
+direction-set at `a` is a `FinPolySet`. Lifts the categorical reading
+("morphisms out of `a`") onto the polynomial-level data without forcing
+the full `to_category` enumeration when only the out-set at one object
+is needed.
+
+Errors if `direction_at(c.carrier, a)` is not a `FinPolySet`.
+
+# Examples
+```julia
+c = free_labeled_transition_comonoid([:a, :b], [(:a, :f, :b)])
+morphisms_out_of(c, :a)  # => [(), (:f,)]
+morphisms_out_of(c, :b)  # => [()]
+```
+
+See also: [`cod_in_comonoid`](@ref), [`direction_at`](@ref),
+[`to_category`](@ref).
+"""
+function morphisms_out_of(c::Comonoid, a)
+    Da = direction_at(c.carrier, a)
+    Da isa FinPolySet ||
+        error("morphisms_out_of: c[$a] is $(typeof(Da)); need FinPolySet")
+    collect(Da.elements)
+end
+
+"""
+    cod_in_comonoid(c::Comonoid, a, f) -> Object
+
+For a morphism `f ∈ direction_at(c.carrier, a)`, return its codomain
+(an object of `c` — i.e., a position of `c.carrier`).
+
+Reads off `c.duplicator.on_positions.f(a)`, which by the `Comonoid`
+invariant returns `(a, jbar)` where `jbar :: f ↦ cod(f)`. Equivalent to
+`c.duplicator.on_positions.f(a)[2][f]`, but factored out as a named
+function so callers thinking categorically don't have to know the
+duplicator's tuple shape.
+
+Errors with a clear message if `f` is not in the out-set at `a`.
+
+# Examples
+```julia
+c = free_labeled_transition_comonoid([:a, :b], [(:a, :f, :b)])
+cod_in_comonoid(c, :a, ())      # => :a   (identity at :a)
+cod_in_comonoid(c, :a, (:f,))   # => :b   (f : a → b)
+cod_in_comonoid(c, :b, ())      # => :b   (identity at :b)
+```
+
+See also: [`morphisms_out_of`](@ref), [`to_category`](@ref).
+"""
+function cod_in_comonoid(c::Comonoid, a, f)
+    Da = direction_at(c.carrier, a)
+    Da isa FinPolySet ||
+        error("cod_in_comonoid: c[$a] is $(typeof(Da)); need FinPolySet")
+    f in Da.elements ||
+        error("cod_in_comonoid: $f is not a direction at position $a " *
+              "(directions at $a are $(collect(Da.elements)))")
+    a_dup, jbar = c.duplicator.on_positions.f(a)
+    a_dup == a ||
+        error("cod_in_comonoid: duplicator on positions does not preserve " *
+              "first component at $a: got $a_dup")
+    jbar[f]
 end
